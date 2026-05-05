@@ -19,10 +19,10 @@ ZONES = {
 
 # Soglie per assegnare le zone basate sulla percentuale di copertura weed (0-1)
 THRESHOLDS = [
-    (0.8, "Zona Rossa"),
-    (0.6, "Zona Blu"),
-    (0.4, "Zona Gialla"),
-    (0.0, "Zona Verde"),
+    (0.25, "Zona Rossa"),
+    (0.15, "Zona Blu"),
+    (0.7, "Zona Gialla"),
+    (0.00, "Zona Verde"),
 ]
 
 class HerbicideRecommendationSystem:
@@ -96,7 +96,7 @@ class HerbicideRecommendationSystem:
         tolerance_mode: 'conservative' (meno erbicida), 'liberal' (più erbicida)
         """
         if tolerance_mode == 'conservative':
-            adjusted_coverage = coverage * (1 - self.accuracy)
+            adjusted_coverage = coverage * self.accuracy
         elif tolerance_mode == 'liberal':
             adjusted_coverage = coverage * (1 + (1 - self.accuracy))
         else:
@@ -161,7 +161,7 @@ if __name__ == "__main__":
         model_name="segformer",
         id2label=id2label,
         checkpoint_path="weights/segformer.pth",
-        accuracy=0.85  # Da calcolare o fornire
+        accuracy=0.80  # Da calcolare o fornire
     )
     
     "Carica un'immagine di esempio (sostituisci con path reale)"
