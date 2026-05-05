@@ -47,11 +47,14 @@ class WeedMapDataset(Dataset):
                 field: os.path.join(gt_folder, field) for field in self.fields
             }
             for k, v in self.gt_folders.items():
-                if os.path.isdir(os.path.join(v, os.listdir(v)[0])):
+                if os.path.isdir(os.path.join(v, "groundtruth")):
                     self.gt_folders[k] = os.path.join(v, "groundtruth")
 
         self.index = [
-            (field, filename) for field in self.fields for filename in os.listdir(self.gt_folders[field])
+            (field, filename) 
+            for field in self.fields 
+            for filename in os.listdir(self.gt_folders[field])
+            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff'))  # Aggiungi estensioni supportate
         ]
 
     # Return the number of images
@@ -102,6 +105,7 @@ class WeedMapDataset(Dataset):
         gt_path = os.path.join(
             self.gt_folders[field], filename
         )
+        print(f"Loading image: {gt_path}")
         gt = self._get_gt(gt_path)
         channels = self._get_image(field, filename)
 
