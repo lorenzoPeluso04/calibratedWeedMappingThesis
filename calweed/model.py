@@ -1,18 +1,23 @@
 import timm
 import torch.nn as nn
 
-from transformers import SegformerForSemanticSegmentation
-from transformers.models.segformer.modeling_segformer import SegformerDecodeHead, SegformerConfig
+from transformers import SegformerForSemanticSegmentation, SegformerConfig
+from transformers.models.segformer.modeling_segformer import SegformerDecodeHead
 from transformers.modeling_outputs import SemanticSegmenterOutput
 
 def get_segformer_model(id2label, params=None):
     label2id = {v:k for k,v in id2label.items()} # -> {'background':0, 'crop':1, 'weed':2}
 
-    # define model
-    segformer_model = SegformerForSemanticSegmentation.from_pretrained("nvidia/mit-b0",
-                                                            num_labels= len(id2label), # 3
-                                                            id2label= id2label,
-                                                            label2id= label2id,
+    # load the backbone config, then override labels to match the downstream task
+    config = SegformerConfig.from_pretrained("nvidia/mit-b0")
+    config.num_labels = len(id2label)
+    config.id2label = id2label
+    config.label2id = label2id
+
+    segformer_model = SegformerForSemanticSegmentation.from_pretrained(
+        "nvidia/mit-b0",
+        config=config,
+        ignore_mismatched_sizes=True,
     )
     return segformer_model
 

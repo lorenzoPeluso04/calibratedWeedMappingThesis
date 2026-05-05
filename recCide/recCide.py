@@ -7,12 +7,14 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from calweed.model import get_model
 
+standard_dosage_per_ha = 1.5  # Litri per ettaro per copertura totale (100%)
+
 # Definizione delle zone e dosaggi
 ZONES = {
-    "Zona Rossa": {"percentage": 1.0, "dosage": 1.5},  # 100%
-    "Zona Blu": {"percentage": 0.8, "dosage": 1.27},   # 80%
-    "Zona Gialla": {"percentage": 0.7, "dosage": 1.05}, # 70%
-    "Zona Verde": {"percentage": 0.5, "dosage": 0.75},  # 50%
+    "Zona Rossa": {"percentage": 1.0, "dosage": standard_dosage_per_ha*1.0},  # 100%
+    "Zona Blu": {"percentage": 0.8, "dosage": standard_dosage_per_ha*0.8},   # 80%
+    "Zona Gialla": {"percentage": 0.7, "dosage": standard_dosage_per_ha*0.7}, # 70%
+    "Zona Verde": {"percentage": 0.5, "dosage": standard_dosage_per_ha*0.5},  # 50%
 }
 
 # Soglie per assegnare le zone basate sulla percentuale di copertura weed (0-1)
@@ -51,6 +53,31 @@ class HerbicideRecommendationSystem:
             logits = outputs.logits
             preds = torch.argmax(logits, dim=1).squeeze(0)  # Shape: [H, W]
         return preds
+
+    def save_segmented_image(self, preds, output_path):
+        """
+        Salva l'immagine segmentata come RGB.
+        preds: torch tensor [H, W]
+        output_path: path dove salvare l'immagine
+        """
+        # Definire la mappa colori per le classi
+        color_map = {
+            0: [0, 0, 0],      # background: nero
+            1: [0, 255, 0],    # crop: verde
+            2: [255, 0, 0],    # weed: rosso
+        }
+        
+        # Creare immagine RGB
+        h, w = preds.shape
+        rgb_image = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        for class_id, color in color_map.items():
+            mask = (preds == class_id).cpu().numpy()
+            rgb_image[mask] = color
+        
+        pil_image = Image.fromarray(rgb_image)
+        pil_image.save(output_path)
+        print(f"Immagine segmentata salvata in: {output_path}")
 
     def calculate_weed_coverage(self, preds):
         """
@@ -94,11 +121,24 @@ class HerbicideRecommendationSystem:
         total_product = dosage_per_ha * area_ha
         return total_product
 
-    def recommend(self, image, tolerance_mode='conservative', area_ha=1.0):
+    def recommend(self, image, tolerance_mode='conservative', area_ha=1.0, output_dir=None):
         """
         Sistema completo di raccomandazione.
         """
         preds = self.predict(image)
+        
+        # Salva immagine segmentata se output_dir è fornito
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            # Usa il nome del file originale se disponibile, altrimenti un nome generico
+            base_name = getattr(image, 'filename', 'segmented.png')
+            if base_name == 'segmented.png':
+                output_path = os.path.join(output_dir, base_name)
+            else:
+                name = os.path.splitext(os.path.basename(base_name))[0] + '_segmented.png'
+                output_path = os.path.join(output_dir, name)
+            self.save_segmented_image(preds, output_path)
+        
         coverage = self.calculate_weed_coverage(preds)
         adjusted_coverage = self.apply_tolerance(coverage, tolerance_mode)
         zone = self.assign_zone(adjusted_coverage)
@@ -124,7 +164,7 @@ if __name__ == "__main__":
         accuracy=0.85  # Da calcolare o fornire
     )
     
-    # Carica un'immagine di esempio (sostituisci con path reale)
-    # image = Image.open("path/to/patch.png")
-    # result = system.recommend(image, tolerance_mode='conservative', area_ha=0.01)  # Per una patch piccola
-    # print(result)
+    "Carica un'immagine di esempio (sostituisci con path reale)"
+    image = Image.open("RoWeeder/dataset/patches/512/003/RGB/14.png")
+    result = system.recommend(image, tolerance_mode='conservative', area_ha=0.01, output_dir="segmented_outputs")  # Per una patch piccola
+    print(result)
