@@ -4,6 +4,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 import sys
 import os
+import pickle
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from calweed.model import get_model
 
@@ -19,25 +20,59 @@ ZONES = {
 
 # Soglie per assegnare le zone basate sulla percentuale di copertura weed (0-1)
 THRESHOLDS = [
-    (0.25, "Zona Rossa"),
-    (0.15, "Zona Blu"),
-    (0.7, "Zona Gialla"),
+    (0.15, "Zona Rossa"),
+    (0.10, "Zona Blu"),
+    (0.05, "Zona Gialla"),
     (0.00, "Zona Verde"),
 ]
 
 class HerbicideRecommendationSystem:
-    def __init__(self, model_name, id2label, checkpoint_path=None, accuracy=0.8):
+    def __init__(self, model_name, id2label, model_variant=None, accuracy=0.8, calibration_file=None):
+        """
+        Sistema di raccomandazione erbicida.
+        
+        Args:
+            model_name: "segformer" o "mobilenetv4"
+            id2label: dizionario classe -> nome
+            model_variant: variante del modello (opzionale)
+                - None: modello base (es. "segformer.pth")
+                - "focal_gamma1.0": calibrato con focal loss gamma=1.0
+                - "focal_gamma2.0": calibrato con focal loss gamma=2.0
+            accuracy: accuratezza del modello per la tolleranza
+            calibration_file: path al file .pkl con parametri di calibrazione (opzionale)
+        """
         self.model_name = model_name
         self.id2label = id2label
+        self.model_variant = model_variant
         self.accuracy = accuracy  # Accuracy del modello, da fornire o calcolare
+        self.calibration_params = None  # Parametri di calibrazione
+        
+        # Costruisci il path del checkpoint
+        if model_variant:
+            checkpoint_path = f"weights/{model_name}_{model_variant}.pth"
+        else:
+            checkpoint_path = f"weights/{model_name}.pth"
+        
         self.model = get_model(model_name, id2label)
-        if checkpoint_path:
+        if os.path.exists(checkpoint_path):
             weights = torch.load(checkpoint_path, map_location="cpu")
             self.model.load_state_dict(weights)
+            print(f"Caricato modello: {checkpoint_path}")
+        else:
+            print(f"Attenzione: checkpoint {checkpoint_path} non trovato, uso modello base")
+        
+        # Carica parametri di calibrazione se forniti
+        if calibration_file and os.path.exists(calibration_file):
+            with open(calibration_file, 'rb') as f:
+                self.calibration_params = pickle.load(f)
+            print(f"Caricati parametri di calibrazione da: {calibration_file}")
+        elif calibration_file:
+            print(f"Attenzione: file di calibrazione {calibration_file} non trovato")
+        
         self.model.eval()
         self.transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Standard per ImageNet
+            #transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Standard per ImageNet
         ])
 
     def predict(self, image):
@@ -51,6 +86,17 @@ class HerbicideRecommendationSystem:
         with torch.no_grad():
             outputs = self.model(pixel_values=input_tensor)
             logits = outputs.logits
+            
+            # Applica calibrazione se parametri disponibili
+            if self.calibration_params is not None:
+                # Assumi Temperature Scaling (logits / temperature)
+                if 'temperature' in self.calibration_params:
+                    temperature = self.calibration_params['temperature']
+                    if isinstance(temperature, torch.Tensor):
+                        temperature = temperature.to(logits.device)
+                    logits = logits / temperature
+                # Se ci sono altri tipi di calibrazione, aggiungerli qui
+                
             preds = torch.argmax(logits, dim=1).squeeze(0)  # Shape: [H, W]
         return preds
 
@@ -156,15 +202,21 @@ if __name__ == "__main__":
     # Assumi id2label dal dataset
     id2label = {0: "background", 1: "crop", 2: "weed"}
     
-    # Crea il sistema
+    # Opzioni modello disponibili:
+    # - model_variant=None: modello base (segformer.pth)
+    # - model_variant="focal_gamma1.0": calibrato con focal loss gamma=1.0
+    # - model_variant="focal_gamma2.0": calibrato con focal loss gamma=2.0
+    # - calibration_file: path al file .pkl per calibrazione (es. temperature scaling)
+    
+    # Crea il sistema con modello calibrato (focal loss gamma 2.0 + temperature scaling)
     system = HerbicideRecommendationSystem(
         model_name="segformer",
         id2label=id2label,
-        checkpoint_path="weights/segformer.pth",
-        accuracy=0.80  # Da calcolare o fornire
+        accuracy=0.80,  # Da calcolare o fornire
+        calibration_file="weights/segformer_calibrated_n30_temperature_scaling.pkl"  # File .pkl opzionale
     )
     
-    "Carica un'immagine di esempio (sostituisci con path reale)"
-    image = Image.open("RoWeeder/dataset/patches/512/003/RGB/14.png")
+    # Carica un'immagine di esempio (sostituisci con path reale)
+    image = Image.open("RoWeeder/dataset/patches/512/003/RGB/17.png")
     result = system.recommend(image, tolerance_mode='conservative', area_ha=0.01, output_dir="segmented_outputs")  # Per una patch piccola
     print(result)
