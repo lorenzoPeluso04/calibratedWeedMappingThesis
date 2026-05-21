@@ -2,8 +2,10 @@ from torch import nn
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+import numpy as np
 
 import evaluate
+from calweed.recommendation import calculate_usage_and_zone, calculate_herbicide_saving_index, THRESHOLDS
 
 
 def make_predictions(model, test_dataloader, calibrate_fn=None, parameters=None):
@@ -114,3 +116,74 @@ def print_F1_score(predictions, labels, id2label):
         )
         
     return f1_metrics
+
+
+def calculate_false_negative_rate(preds, labels, weed_id):
+    pred_weed = preds == weed_id
+    true_weed = labels == weed_id
+    fn_pixels = torch.logical_and(true_weed, ~pred_weed).sum().item()
+    true_weed_pixels = true_weed.sum().item()
+    if true_weed_pixels == 0:
+        return 0.0
+    return fn_pixels / true_weed_pixels
+
+
+def calculate_weed_coverage_underestimation(preds, labels, weed_id):
+    """
+    Calcola la differenza di superficie occupata dalle erbacce non rilevata.
+    Restituisce la sottostima della copertura weed: max(0, coverage_real - coverage_pred)
+    """
+    pred_weed_mask = preds == weed_id
+    true_weed_mask = labels == weed_id
+    
+    coverage_pred = pred_weed_mask.float().mean().item()
+    coverage_real = true_weed_mask.float().mean().item()
+    
+    underestimation = max(0.0, coverage_real - coverage_pred)  # Solo sottostima positiva
+    return underestimation
+
+
+
+def compute_herbicide_saving_metrics(predictions, labels, id2label, area_ha=1.0):
+    weed_id = next(k for k, v in id2label.items() if v == "weed")
+    predictions = predictions.detach().cpu()
+    labels = labels.detach().cpu()
+
+    batch_size = predictions.shape[0]
+    savings = []
+    underestimations = []
+    zone_counts = {zone: 0 for _, zone in THRESHOLDS}
+    zone_savings = {zone: [] for _, zone in THRESHOLDS}
+
+    for idx in range(batch_size):
+        pred_map = predictions[idx]
+        label_map = labels[idx]
+        pred_weed_mask = pred_map == weed_id
+        coverage = float(pred_weed_mask.float().mean().item())
+        usage, zone = calculate_usage_and_zone(coverage, area_ha=area_ha)
+        saving = calculate_herbicide_saving_index(usage, area_ha=area_ha)
+        underestimation = calculate_weed_coverage_underestimation(pred_map, label_map, weed_id)
+
+        savings.append(saving)
+        underestimations.append(underestimation)
+        zone_counts[zone] += 1
+        zone_savings[zone].append(saving)
+
+    mean_saving = float(np.mean(savings)) if savings else 0.0
+    median_saving = float(np.median(savings)) if savings else 0.0
+    mean_underestimation = float(np.mean(underestimations)) if underestimations else 0.0
+    max_saving = float(np.max(savings)) if savings else 0.0
+    min_saving = float(np.min(savings)) if savings else 0.0
+
+    summary = {
+        "mean_saving_index": mean_saving,
+        "median_saving_index": median_saving,
+        "max_saving_index": max_saving,
+        "min_saving_index": min_saving,
+        "mean_weed_coverage_underestimation": mean_underestimation,
+        "zone_counts": zone_counts,
+        "zone_savings": {zone: float(np.mean(vals)) if vals else 0.0 for zone, vals in zone_savings.items()},
+        "n_images": batch_size,
+    }
+
+    return summary

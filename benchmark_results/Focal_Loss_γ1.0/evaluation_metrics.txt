@@ -1,0 +1,6 @@
+Model: segformer (variant: focal_gamma1.0)
+Superpixels: 161
+ECE: 0.3135
+AQ Spatial Absolute: 6.00
+Over-spraying Rate: 0.0000
+Under-spraying Rate: 0.0000

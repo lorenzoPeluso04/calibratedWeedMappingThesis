@@ -1,0 +1,5 @@
+Model,ECE,AQ_Spatial_Absolute,Over_spraying,Under_spraying
+Base (non calibrato),0.0278,40.00,0.0002,0.0000
+Focal Loss γ=1.0,0.2957,0.00,0.0000,0.0000
+Focal Loss γ=2.0,0.0504,52.00,0.0002,0.0000
+Focal + Temp Scaling,0.0035,52.00,0.0002,0.0000

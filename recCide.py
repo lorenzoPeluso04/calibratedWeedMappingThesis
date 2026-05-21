@@ -1,0 +1,497 @@
+import torch
+import torch.nn.functional as F
+import numpy as np
+from PIL import Image
+import torchvision.transforms as transforms
+import sys
+import os
+import pickle
+from typing import Iterable, List, Optional, Union
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from calweed.model import get_model
+from calweed.recommendation import (
+    ZONES,
+    assign_zone,
+    calculate_herbicide_usage,
+    calculate_weed_coverage,
+    apply_tolerance,
+)
+from calweed.superpixel import (
+    compute_superpixels,
+    superpixel_statistics,
+    pixels_to_area_m2,
+    pixels_to_area_ha,
+    save_superpixel_segmentation,
+)
+from calweed.calibration_metrics import compute_all_calibration_metrics
+
+class HerbicideRecommendationSystem:
+    def __init__(self, model_name, id2label, model_variant=None, accuracy=0.9, 
+                 calibration_file=None, checkpoint_path=None):
+        """
+        Sistema di raccomandazione erbicida.
+        
+        Args:
+            model_name: "segformer" o "mobilenetv4"
+            id2label: dizionario classe -> nome
+            model_variant: variante del modello (opzionale)
+                - None: modello base (es. "segformer.pth")
+                - "focal_gamma1.0": calibrato con focal loss gamma=1.0
+                - "focal_gamma2.0": calibrato con focal loss gamma=2.0
+            accuracy: accuratezza del modello per la tolleranza
+            calibration_file: path al file .pkl con parametri di calibrazione (opzionale)
+            checkpoint_path: path esplicito del file di checkpoint del modello
+        """
+        self.root_dir = os.path.dirname(os.path.abspath(__file__))
+        self.model_name = model_name
+        self.id2label = id2label
+        self.model_variant = model_variant
+        self.accuracy = accuracy  # Accuracy del modello, da fornire o calcolare
+        self.calibration_params = None  # Parametri di calibrazione
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if checkpoint_path:
+            self.checkpoint_path = checkpoint_path if os.path.isabs(checkpoint_path) else os.path.join(self.root_dir, checkpoint_path)
+        elif model_variant:
+            self.checkpoint_path = os.path.join(self.root_dir, "weights", f"{model_name}_{model_variant}.pth")
+        else:
+            self.checkpoint_path = os.path.join(self.root_dir, "weights", f"{model_name}.pth")
+
+        self.model = get_model(model_name, id2label).to(self.device)
+        if os.path.exists(self.checkpoint_path):
+            weights = torch.load(self.checkpoint_path, map_location=self.device)
+            self.model.load_state_dict(weights)
+            print(f"✓ Caricato modello: {self.checkpoint_path}")
+        else:
+            raise FileNotFoundError(
+                f"❌ Checkpoint non trovato: {self.checkpoint_path}\n"
+                f"Assicurati che il file esista in: weights/{model_name}.pth"
+            )
+
+        if calibration_file:
+            self.load_calibration_params(calibration_file)
+
+        self.model.eval()
+        self.transform = transforms.Compose([
+            transforms.ToTensor()
+        ])
+
+    def load_calibration_params(self, calibration_file: str):
+        calibrated_path = calibration_file
+        if not os.path.isabs(calibration_file):
+            calibrated_path = os.path.join(self.root_dir, calibration_file)
+
+        if os.path.exists(calibrated_path):
+            with open(calibrated_path, 'rb') as f:
+                self.calibration_params = pickle.load(f)
+            print(f"Caricati parametri di calibrazione da: {calibrated_path}")
+        else:
+            print(f"Attenzione: file di calibrazione {calibrated_path} non trovato")
+            self.calibration_params = None
+
+    def _apply_calibration(self, logits):
+        if self.calibration_params is None:
+            return logits
+
+        if isinstance(self.calibration_params, dict):
+            if 'temperature' in self.calibration_params:
+                temperature = self.calibration_params['temperature']
+                if isinstance(temperature, torch.Tensor):
+                    temperature = temperature.to(logits.device)
+                return logits / temperature
+            return logits
+
+        if isinstance(self.calibration_params, (list, tuple)):
+            if len(self.calibration_params) == 1:
+                temperature = self.calibration_params[0]
+                if isinstance(temperature, torch.nn.Parameter):
+                    temperature = temperature.detach()
+                temperature = temperature.to(logits.device)
+                return logits / temperature
+
+            if len(self.calibration_params) == 2:
+                P, b = self.calibration_params
+                if isinstance(P, torch.nn.Parameter):
+                    P = P.detach()
+                if isinstance(b, torch.nn.Parameter):
+                    b = b.detach()
+                P = P.to(logits.device)
+                b = b.to(logits.device)
+                B, C, H, W = logits.shape
+                reshape1 = logits.reshape(B, C, -1)
+                reshape1_permutated = reshape1.permute(1, 0, 2)
+                Z = reshape1_permutated.reshape(C, -1)
+                calibrated_logits = P @ Z + b
+                reshape1_permutated_BACK = calibrated_logits.reshape(C, B, -1)
+                reshape1_BACK = reshape1_permutated_BACK.permute(1, 0, 2)
+                return reshape1_BACK.reshape(B, C, H, W)
+
+        raise ValueError("Formato dei parametri di calibrazione non supportato")
+
+    def predict(self, image: Union[str, np.ndarray, Image.Image], return_probs: bool = True):
+        """
+        Effettua inferenza sull'immagine.
+        image: path, PIL Image o numpy array
+        return_probs: se True restituisce anche le probabilità per classe
+
+        Le predizioni sono restituite come tensor di classe per pixel, 
+        e opzionalmente anche le probabilità per classe.
+        Le predizioni riguardano i singoli pixel, non i superpixel. 
+        La raccomandazione finale sarà basata sui superpixel, ma questa 
+        funzione restituisce le predizioni a livello di pixel.
+        """
+        if isinstance(image, str):
+            image = Image.open(image).convert("RGB")
+        elif isinstance(image, np.ndarray):
+            if image.ndim == 3 and image.shape[2] == 3:
+                image = Image.fromarray(image.astype('uint8'))
+            elif image.ndim == 3 and image.shape[0] == 3:
+                image = Image.fromarray(np.transpose(image, (1, 2, 0)).astype('uint8'))
+            else:
+                raise ValueError("Unsupported numpy image shape: {}".format(image.shape))
+
+        input_tensor = self.transform(image).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            outputs = self.model(pixel_values=input_tensor)
+            logits = outputs.logits
+            logits = self._apply_calibration(logits)
+            if logits.shape[-2:] != input_tensor.shape[-2:]:
+                logits = F.interpolate(logits, size=input_tensor.shape[-2:], mode="bilinear", align_corners=False)
+            probs = torch.softmax(logits, dim=1)
+            preds = torch.argmax(probs, dim=1).squeeze(0)
+
+        if return_probs:
+            return preds, probs.squeeze(0)
+        return preds
+
+    def recommend_from_path(self, image_path: str, tolerance_mode='liberal', area_ha=1.0, output_dir=None):
+        return self.recommend(image_path, tolerance_mode=tolerance_mode, area_ha=area_ha, output_dir=output_dir)
+
+    def recommend_superpixels(self, image: Union[str, np.ndarray, Image.Image], num_segments: int = 200,
+                              compactness: float = 10.0, sigma: float = 1.0, tolerance_mode: str = 'liberal',
+                              gsd_m: float = 0.05, output_dir: Optional[str] = None):
+        image_path = None
+        if isinstance(image, str):
+            image_path = image
+            image = Image.open(image).convert("RGB")
+        elif hasattr(image, 'filename'):
+            image_path = image.filename
+
+        preds, probs = self.predict(image, return_probs=True)
+        weed_id = next(k for k, v in self.id2label.items() if v == "weed")
+        weed_probs = probs[weed_id].cpu().numpy()
+
+        labels = compute_superpixels(image, num_segments=num_segments, compactness=compactness, sigma=sigma)
+        stats = superpixel_statistics(labels, weed_probs, gsd_m=gsd_m)
+
+        total_usage = sum(item["usage_L"] for item in stats)
+        total_area_ha = sum(item["area_ha"] for item in stats)
+
+        result = {
+            "n_superpixels": len(stats),
+            "total_area_ha": total_area_ha,
+            "total_herbicide_usage_L": total_usage,
+            "superpixel_stats": stats,
+        }
+
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Estrai il nome dell'immagine per i file di output
+            image_name = os.path.basename(image_path) if image_path else "image"
+            base_name = os.path.splitext(image_name)[0]
+            
+            # Salva l'immagine segmentata in cartella "segmented"
+            segmented_path = save_superpixel_segmentation(labels, image, output_dir, image_name=image_name)
+            print(f"Immagine superpixel salvata in: {segmented_path}")
+            
+            # Salva il report CSV
+            report_path = os.path.join(output_dir, f"superpixel_recommendation_{base_name}_{self.model_name}.csv")
+            with open(report_path, "w") as f:
+                headers = ["label", "mean_weed_prob", "pixel_count", "area_m2", "area_ha", "zone", "usage_L"]
+                f.write(",".join(headers) + "\n"
+                )
+                for item in stats:
+                    row = [str(item[h]) for h in headers]
+                    f.write(",".join(row) + "\n")
+            print(f"Report superpixel salvato in: {report_path}")
+
+        return result
+
+    def evaluate_superpixels(self, image: Union[str, np.ndarray, Image.Image], 
+                            ground_truth: Union[str, np.ndarray],
+                            num_segments: int = 200, compactness: float = 10.0, sigma: float = 1.0,
+                            gsd_m: float = 0.05, n_bins: int = 10, output_dir: Optional[str] = None):
+        """
+        Valuta la segmentazione superpixel con metriche di calibrazione e qualità spaziale.
+        
+        Args:
+            image: immagine RGB
+            ground_truth: ground truth come path o numpy array
+            num_segments: numero di superpixel
+            gsd_m: Ground Sampling Distance in m/pixel
+            n_bins: numero di bin per ECE
+            output_dir: cartella per salvare il report
+        
+        Returns:
+            dizionario con tutte le metriche
+        """
+        image_path = None
+        if isinstance(image, str):
+            image_path = image
+            image = Image.open(image).convert("RGB")
+        
+        if isinstance(ground_truth, str):
+            gt_image = Image.open(ground_truth)
+            gt_array = np.asarray(gt_image)
+            ground_truth = gt_array.argmax(axis=-1) if gt_array.ndim == 3 else gt_array
+        
+        ground_truth = np.asarray(ground_truth)
+        
+        preds, probs = self.predict(image, return_probs=True)
+        weed_id = next(k for k, v in self.id2label.items() if v == "weed")
+        weed_probs = probs[weed_id].cpu().numpy()
+        preds_np = preds.cpu().numpy()
+        
+        labels = compute_superpixels(image, num_segments=num_segments, compactness=compactness, sigma=sigma)
+        
+        metrics = compute_all_calibration_metrics(
+            labels, weed_probs, preds_np, ground_truth, weed_id, n_bins=n_bins
+        )
+        
+        result = {
+            "model_name": self.model_name,
+            "model_variant": self.model_variant,
+            "num_superpixels": int(labels.max()),
+            "gsd_m": gsd_m,
+            **metrics,
+        }
+        
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            # Estrai il nome dell'immagine per il file di output
+            image_name = os.path.basename(image_path) if image_path else "image"
+            base_name = os.path.splitext(image_name)[0]
+            report_path = os.path.join(output_dir, f"evaluation_metrics_{base_name}_{self.model_name}.txt")
+            with open(report_path, "w") as f:
+                f.write(f"Image: {image_name}\n")
+                f.write(f"Model: {self.model_name} (variant: {self.model_variant})\n")
+                f.write(f"Superpixels: {result['num_superpixels']}\n")
+                f.write(f"ECE: {metrics['ece']:.4f}\n")
+                f.write(f"AQ Spatial Absolute: {metrics['aq_spatial_absolute']:.2f}\n")
+                f.write(f"Over-spraying Rate: {metrics['overspreading_rate']:.4f}\n")
+                f.write(f"Under-spraying Rate: {metrics['underspreading_rate']:.4f}\n")
+            print(f"Report di valutazione salvato in: {report_path}")
+        
+        return result
+
+    def recommend_batch(self, image_paths: Iterable[str], tolerance_mode='liberal', area_ha=1.0, output_dir=None):
+        results = {}
+        for image_path in image_paths:
+            results[image_path] = self.recommend_from_path(image_path, tolerance_mode=tolerance_mode, area_ha=area_ha, output_dir=output_dir)
+        return results
+
+    def save_segmented_image(self, preds, output_path):
+        """
+        Salva l'immagine segmentata come RGB.
+        preds: torch tensor [H, W] o [1, H, W] o [B, H, W]
+        output_path: path dove salvare l'immagine
+        """
+        # Assicurati che preds sia 2D (H, W)
+        if preds.dim() > 2:
+            preds = preds.squeeze()
+        if preds.dim() > 2:
+            preds = preds[0]  # Prendi il primo elemento del batch
+        
+        # Definire la mappa colori per le classi
+        color_map = {
+            0: [0, 0, 0],      # background: nero
+            1: [0, 255, 0],    # crop: verde
+            2: [255, 0, 0],    # weed: rosso
+        }
+        
+        # Creare immagine RGB
+        h, w = preds.shape
+        rgb_image = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        for class_id, color in color_map.items():
+            mask = (preds == class_id).cpu().numpy()
+            rgb_image[mask] = color
+        
+        pil_image = Image.fromarray(rgb_image)
+        pil_image.save(output_path)
+        print(f"Immagine segmentata salvata in: {output_path}")
+
+    def calculate_weed_coverage(self, preds):
+        """
+        Calcola la percentuale di area coperta da weed.
+        preds: torch tensor di predizioni [H, W]
+        """
+        return calculate_weed_coverage(preds, self.id2label)
+
+    def apply_tolerance(self, coverage, tolerance_mode='conservative'):
+        """
+        Applica tolleranza basata sull'accuracy del modello.
+        tolerance_mode: 'conservative' (meno erbicida), 'liberal' (più erbicida)
+        """
+        return apply_tolerance(coverage, self.accuracy, tolerance_mode)
+
+    def assign_zone(self, coverage):
+        """
+        Assegna la zona basata sulla copertura.
+        """
+        return assign_zone(coverage)
+
+    def calculate_herbicide_usage(self, zone, area_ha=1.0):
+        """
+        Calcola l'uso di erbicida per la zona.
+        area_ha: area in ettari (default 1 per ha)
+        """
+        return calculate_herbicide_usage(zone, area_ha)
+
+    def recommend(self, image, tolerance_mode='conservative', area_ha=1.0, output_dir=None):
+        """
+        Sistema completo di raccomandazione.
+        """
+        if isinstance(image, str):
+            image = Image.open(image).convert("RGB")
+
+        preds, probs = self.predict(image, return_probs=True)
+        
+        # Salva immagine segmentata se output_dir è fornito
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            # Usa il nome del file originale se disponibile, altrimenti un nome generico
+            base_name = getattr(image, 'filename', 'segmented.png')
+            if base_name == 'segmented.png':
+                output_path = os.path.join(output_dir, base_name)
+            else:
+                name = os.path.splitext(os.path.basename(base_name))[0] + '_segmented.png'
+                output_path = os.path.join(output_dir, name)
+            self.save_segmented_image(preds, output_path)
+        
+        coverage = self.calculate_weed_coverage(preds)
+        adjusted_coverage = self.apply_tolerance(coverage, tolerance_mode)
+        zone = self.assign_zone(adjusted_coverage)
+        usage = self.calculate_herbicide_usage(zone, area_ha)
+        return {
+            "coverage": coverage,
+            "adjusted_coverage": adjusted_coverage,
+            "zone": zone,
+            "herbicide_usage_L": usage,
+            "dosage_per_ha": ZONES[zone]["dosage"]
+        }
+
+# Esempio di utilizzo
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Sistema di raccomandazione erbicida")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["recommend", "superpixels"],
+        default="superpixels",
+        help="Modalità di raccomandazione: 'recommend' (pixel) o 'superpixels' (superpixel)"
+    )
+    parser.add_argument(
+        "--image",
+        type=str,
+        default="RoWeeder/dataset/patches/512/003/RGB/14.png",
+        help="Path all'immagine di input"
+    )
+    parser.add_argument(
+        "--ground-truth",
+        type=str,
+        default=None,
+        help="Path alla ground truth (solo per valutazione superpixel)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="segmented_outputs",
+        help="Directory di output"
+    )
+    parser.add_argument(
+        "--num-segments",
+        type=int,
+        default=200,
+        help="Numero di superpixel (solo per modalità superpixels)"
+    )
+    parser.add_argument(
+        "--gsd-m",
+        type=float,
+        default=0.05,
+        help="Ground Sampling Distance in m/pixel"
+    )
+    parser.add_argument(
+        "--area-ha",
+        type=float,
+        default=1.0,
+        help="Area in ettari"
+    )
+    parser.add_argument(
+        "--tolerance-mode",
+        type=str,
+        choices=["conservative", "liberal"],
+        default="liberal",
+        help="Modalità di tolleranza"
+    )
+    
+    args = parser.parse_args()
+    
+    # Assumi id2label dal dataset
+    id2label = {0: "background", 1: "crop", 2: "weed"}
+    
+    # Opzioni modello disponibili:
+    # - model_variant=None: modello base (segformer.pth)
+    # - model_variant="focal_gamma1.0": calibrato con focal loss gamma=1.0
+    # - model_variant="focal_gamma2.0": calibrato con focal loss gamma=2.0
+    # - calibration_file: path al file .pkl per calibrazione (es. temperature scaling)
+    
+    # Crea il sistema con modello calibrato (focal loss gamma 2.0 + temperature scaling)
+    system = HerbicideRecommendationSystem(
+        model_name="segformer",
+        id2label=id2label,
+        accuracy=0.80,  # Da calcolare o fornire
+        calibration_file="weights/segformer_calibrated_n30_temperature_scaling.pkl"  # File .pkl opzionale
+    )
+    
+    print(f"\n{'='*60}")
+    print(f"Modalità: {args.mode.upper()}")
+    print(f"Immagine: {args.image}")
+    print(f"Directory output: {args.output_dir}")
+    print(f"{'='*60}\n")
+    
+    if args.mode == "superpixels":
+        # Raccomandazione con superpixel - passa il path, non la PIL Image
+        result = system.recommend_superpixels(
+            args.image,  # Pass path directly
+            num_segments=args.num_segments,
+            gsd_m=args.gsd_m,
+            tolerance_mode=args.tolerance_mode,
+            output_dir=args.output_dir
+        )
+        print("📊 RISULTATI RACCOMANDAZIONE SUPERPIXEL:")
+        print(f"  Numero di superpixel: {result['n_superpixels']}")
+        print(f"  Area totale: {result['total_area_ha']:.6f} ha")
+        print(f"  Uso totale erbicida: {result['total_herbicide_usage_L']:.4f} L")
+        
+    else:
+        # Raccomandazione standard a livello di pixel
+        image = Image.open(args.image)
+        result = system.recommend(
+            image,
+            tolerance_mode=args.tolerance_mode,
+            area_ha=args.area_ha,
+            output_dir=args.output_dir
+        )
+        print("🎯 RISULTATI RACCOMANDAZIONE PIXEL:")
+        print(f"  Copertura erbacce: {result['coverage']*100:.2f}%")
+        print(f"  Copertura aggiustata: {result['adjusted_coverage']*100:.2f}%")
+        print(f"  Zona: {result['zone']}")
+        print(f"  Uso erbicida: {result['herbicide_usage_L']:.4f} L")
+        print(f"  Dosaggio per ha: {result['dosage_per_ha']} L/ha")
+    
+    print(f"\n✓ Analisi completata!\n")

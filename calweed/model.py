@@ -59,3 +59,42 @@ def get_model(model_name: str, id2label, params=None):
     if model_name not in model_dict:
         raise ValueError(f"Model {model_name} not found in model_dict")
     return model_dict[model_name](id2label, params)
+
+
+def load_segmentation_model(model_name: str, weights=None, device="cpu"):
+    """
+    Load a segmentation model with pre-trained weights.
+    
+    Args:
+        model_name: Name of the model ('segformer' or 'mobilenetv4')
+        weights: Path to saved model weights
+        device: Device to load the model on ('cpu' or 'cuda')
+    
+    Returns:
+        model: Loaded model on the specified device
+    """
+    import torch
+    
+    # Default id2label mapping for RoWeeder dataset
+    id2label = {0: "background", 1: "crop", 2: "weed"}
+    
+    # Get the base model
+    model = get_model(model_name, id2label)
+    
+    # Load weights if provided
+    if weights is not None:
+        if isinstance(weights, str):
+            checkpoint = torch.load(weights, map_location=device)
+            # Handle different checkpoint formats
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+    
+    # Move to device and set to eval mode
+    model = model.to(device)
+    model.eval()
+    
+    return model

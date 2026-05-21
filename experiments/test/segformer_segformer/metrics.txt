@@ -1,0 +1,11 @@
+ECE -> 0.0489812009036541
+Accuracy for each bin -> [0.41465115547180176, 0.5232052803039551, 0.6271778345108032, 0.760520339012146, 0.8792199492454529, 0.9628511667251587, 0.9988298416137695]
+Confidence for each bin -> [0.37866026163101196, 0.46819010376930237, 0.5504045486450195, 0.6515016555786133, 0.7530644536018372, 0.8584096431732178, 0.9596725106239319]
+SCE -> 0.16631881892681122
+SCE for each class -> {'background': tensor(0.0589), 'crop': tensor(0.2405), 'weed': tensor(0.1996)}
+F1 score -> [0.98609994 0.79868152 0.62914677]
+Mean herbicide saving index -> 0.9123
+Median herbicide saving index -> 1.0000
+Mean weed coverage underestimation -> 0.0069
+Zone counts -> {'Zona Rossa': 1, 'Zona Blu': 4, 'Zona Gialla': 3, 'Zona Verde': 57}
+Average saving per zone -> {'Zona Rossa': 0.0, 'Zona Blu': 0.19999999999999984, 'Zona Gialla': 0.5, 'Zona Verde': 1.0}
