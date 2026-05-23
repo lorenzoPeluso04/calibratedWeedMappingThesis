@@ -1,0 +1,7 @@
+Image: 35.png
+Model: segformer (variant: None)
+Superpixels: 151
+ECE: 0.0018
+AQ Spatial Absolute: 40.00
+Over-spraying Rate: 0.0002
+Under-spraying Rate: 0.0000

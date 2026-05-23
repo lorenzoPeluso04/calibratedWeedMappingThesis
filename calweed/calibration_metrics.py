@@ -3,6 +3,78 @@ import torch
 from typing import Tuple, Dict, List
 from sklearn.metrics import confusion_matrix
 
+def evaluate_superpixel_decisions(superpixel_labels: np.ndarray,
+                                  weed_probs: np.ndarray,
+                                  ground_truth: np.ndarray,
+                                  weed_id: int,
+                                  threshold: float = 0.10,
+                                  gt_tolerance: float = 0.01) -> Dict[str, float]:
+    """
+    Calcola le metriche decisionali (AQ, Over-spraying, Under-spraying) 
+    basandosi sulle REALI macro-decisioni a livello di superpixel.
+    
+    Args:
+        threshold: La soglia dell'agricoltore (tau). Se la probabilità media 
+                   del superpixel >= threshold, viene TRATTATO (Spruzzato).
+        gt_tolerance: Tolleranza per considerare un superpixel "Realmente Infestato".
+                      Es. 0.01 significa che basta l'1% di pixel weed veri per attivarlo.
+    """
+    max_label = int(superpixel_labels.max())
+    
+    # Contatori globali per l'intera immagine (in numero di pixel reali)
+    total_fp_pixels = 0  # Pixel sani spruzzati (Spreco)
+    total_fn_pixels = 0  # Pixel infestati non spruzzati (Danno raccolto)
+    
+    total_clean_pixels_in_gt = (ground_truth != weed_id).sum()
+    total_weed_pixels_in_gt = (ground_truth == weed_id).sum()
+    
+    aq_total = 0.0
+    
+    for label in range(1, max_label + 1):
+        mask = superpixel_labels == label
+        if not mask.any():
+            continue
+        
+        # 1. LA REALTÀ (Ground Truth) del Superpixel
+        # Quanti pixel di erbaccia reale ci sono in questo blocco?
+        true_weed_count = (ground_truth[mask] == weed_id).sum()
+        superpixel_area = mask.sum()
+        true_weed_ratio = true_weed_count / superpixel_area
+        
+        # Il superpixel è da considerare infestato nella realtà?
+        is_actually_infested = true_weed_ratio > gt_tolerance
+        
+        # 2. LA DECISIONE DEL SISTEMA (Informata dal Modello)
+        # Qual è la probabilità media stimata dal modello?
+        mean_prob = float(weed_probs[mask].mean())
+        
+        # L'agricoltore decide di spruzzare questo superpixel?
+        is_treated = mean_prob >= threshold
+        
+        # 3. CALCOLO DELLE METRICHE (Pixel Impact)
+        if is_treated:
+            # Se lo spruzziamo, contiamo i pixel che NON dovevano essere spruzzati (FP)
+            # Ovvero tutti i pixel sani all'interno di questo superpixel
+            total_fp_pixels += (superpixel_area - true_weed_count)
+            
+            # AQ: quanti pixel stiamo coprendo in questo superpixel
+            aq_total += abs(superpixel_area - true_weed_count)
+        else:
+            # Se NON lo spruzziamo, contiamo i pixel infestati che abbiamo mancato (FN)
+            total_fn_pixels += true_weed_count
+            
+            # AQ: abbiamo mancato la weed reale
+            aq_total += true_weed_count
+
+    # 4. Tassi finali (Over e Under spraying)
+    over_spray_rate = total_fp_pixels / total_clean_pixels_in_gt if total_clean_pixels_in_gt > 0 else 0.0
+    under_spray_rate = total_fn_pixels / total_weed_pixels_in_gt if total_weed_pixels_in_gt > 0 else 0.0
+    
+    return {
+        "aq_spatial_absolute": float(aq_total),
+        "overspreading_rate": float(over_spray_rate),
+        "underspreading_rate": float(under_spray_rate)
+    }
 
 def expected_calibration_error_superpixel(superpixel_labels: np.ndarray, 
                                           weed_probs: np.ndarray, 

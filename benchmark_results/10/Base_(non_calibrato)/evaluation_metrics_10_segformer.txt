@@ -1,0 +1,7 @@
+Image: 10.png
+Model: segformer (variant: None)
+Superpixels: 166
+ECE: 0.0272
+AQ Spatial Absolute: 576.00
+Over-spraying Rate: 0.0022
+Under-spraying Rate: 0.0000

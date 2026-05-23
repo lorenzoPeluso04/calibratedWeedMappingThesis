@@ -24,7 +24,6 @@ from calweed.superpixel import (
     pixels_to_area_ha,
     save_superpixel_segmentation,
 )
-from calweed.calibration_metrics import compute_all_calibration_metrics
 
 class HerbicideRecommendationSystem:
     def __init__(self, model_name, id2label, model_variant=None, accuracy=0.9, 
@@ -219,72 +218,84 @@ class HerbicideRecommendationSystem:
 
         return result
 
-    def evaluate_superpixels(self, image: Union[str, np.ndarray, Image.Image], 
-                            ground_truth: Union[str, np.ndarray],
-                            num_segments: int = 200, compactness: float = 10.0, sigma: float = 1.0,
-                            gsd_m: float = 0.05, n_bins: int = 10, output_dir: Optional[str] = None):
+    def evaluate_superpixels(self, 
+                             image_path: str, 
+                             ground_truth_path: str, 
+                             num_segments: int = 200, 
+                             compactness: float = 10.0, 
+                             sigma: float = 1.0, 
+                             gsd_m: float = 0.05,
+                             output_dir: str = "evaluation_outputs",
+                             threshold: float = 0.10) -> dict: # <-- Cambiato qui, accettiamo threshold dal main
         """
-        Valuta la segmentazione superpixel con metriche di calibrazione e qualità spaziale.
-        
-        Args:
-            image: immagine RGB
-            ground_truth: ground truth come path o numpy array
-            num_segments: numero di superpixel
-            gsd_m: Ground Sampling Distance in m/pixel
-            n_bins: numero di bin per ECE
-            output_dir: cartella per salvare il report
-        
-        Returns:
-            dizionario con tutte le metriche
+        Valuta le performance spaziali del modello sul campionamento a superpixel
+        eseguendo il calcolo dinamico in base alla soglia dell'agricoltore.
         """
-        image_path = None
-        if isinstance(image, str):
-            image_path = image
-            image = Image.open(image).convert("RGB")
+        import cv2
+        from skimage.segmentation import slic
+        from calweed.calibration_metrics import expected_calibration_error_superpixel
+
+        os.makedirs(output_dir, exist_ok=True)
         
-        if isinstance(ground_truth, str):
-            gt_image = Image.open(ground_truth)
-            gt_array = np.asarray(gt_image)
-            ground_truth = gt_array.argmax(axis=-1) if gt_array.ndim == 3 else gt_array
+        # 1. Caricamento immagine e Ground Truth
+        image = cv2.imread(image_path)
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
-        ground_truth = np.asarray(ground_truth)
+        # Carichiamo la maschera come array numpy in scala di grigi
+        gt_raw = cv2.imread(ground_truth_path, cv2.IMREAD_GRAYSCALE)
         
-        preds, probs = self.predict(image, return_probs=True)
-        weed_id = next(k for k, v in self.id2label.items() if v == "weed")
-        weed_probs = probs[weed_id].cpu().numpy()
-        preds_np = preds.cpu().numpy()
+        # Creiamo una nuova maschera vuota con gli ID corretti (0 = background)
+        gt = np.zeros_like(gt_raw)
         
-        labels = compute_superpixels(image, num_segments=num_segments, compactness=compactness, sigma=sigma)
+        # Mappiamo i valori convertiti dall'RGB a scala di grigi
+        gt[gt_raw == 149] = 1  # Il verde (Crop) diventa ID 1
+        gt[gt_raw == 76] = 2   # Il rosso (Weed) diventa ID 2
+            
+        weed_id = 2
         
-        metrics = compute_all_calibration_metrics(
-            labels, weed_probs, preds_np, ground_truth, weed_id, n_bins=n_bins
+        # 2. Segmentazione in Superpixel dell'immagine RGB originale
+        superpixel_labels = slic(
+            image_rgb, 
+            n_segments=num_segments, 
+            compactness=compactness, 
+            sigma=sigma, 
+            start_label=1
         )
         
-        result = {
-            "model_name": self.model_name,
-            "model_variant": self.model_variant,
-            "num_superpixels": int(labels.max()),
-            "gsd_m": gsd_m,
-            **metrics,
+        # 3. Inferenza del modello (ottiene le probabilità per pixel)
+        pil_img = Image.fromarray(image_rgb)
+        preds, probs = self.predict(pil_img, return_probs=True) 
+        
+        # Trasformiamo il canale della weed in un array numpy compatibile con le metriche
+        weed_probs = probs[weed_id].cpu().numpy()
+        
+        # 4. Calcolo dell'ECE (Indipendente dalla soglia)
+        ece, acc_bin, conf_bin = expected_calibration_error_superpixel(
+            superpixel_labels=superpixel_labels,
+            weed_probs=weed_probs,
+            ground_truth=gt,
+            weed_id=weed_id,
+            n_bins=10
+        )
+        
+        # 5. Calcolo delle metriche spaziali condizionate dalla soglia dell'agricoltore
+        spatial_metrics = evaluate_superpixel_decisions(
+            superpixel_labels=superpixel_labels,
+            weed_probs=weed_probs,
+            ground_truth=gt,
+            weed_id=weed_id,
+            threshold=threshold # <-- Applica la soglia dinamica passata dal main
+        )
+        
+        # Salvataggio visivo opzionale (puoi tenerlo o rimuoverlo se rallenta lo sweep)
+        # save_superpixel_segmentation(image_rgb, superpixel_labels, os.path.join(output_dir, "segmentation.png"))
+        
+        return {
+            "ece": ece,
+            "aq_spatial_absolute": spatial_metrics["aq_spatial_absolute"],
+            "overspreading_rate": spatial_metrics["overspreading_rate"],
+            "underspreading_rate": spatial_metrics["underspreading_rate"]
         }
-        
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            # Estrai il nome dell'immagine per il file di output
-            image_name = os.path.basename(image_path) if image_path else "image"
-            base_name = os.path.splitext(image_name)[0]
-            report_path = os.path.join(output_dir, f"evaluation_metrics_{base_name}_{self.model_name}.txt")
-            with open(report_path, "w") as f:
-                f.write(f"Image: {image_name}\n")
-                f.write(f"Model: {self.model_name} (variant: {self.model_variant})\n")
-                f.write(f"Superpixels: {result['num_superpixels']}\n")
-                f.write(f"ECE: {metrics['ece']:.4f}\n")
-                f.write(f"AQ Spatial Absolute: {metrics['aq_spatial_absolute']:.2f}\n")
-                f.write(f"Over-spraying Rate: {metrics['overspreading_rate']:.4f}\n")
-                f.write(f"Under-spraying Rate: {metrics['underspreading_rate']:.4f}\n")
-            print(f"Report di valutazione salvato in: {report_path}")
-        
-        return result
 
     def recommend_batch(self, image_paths: Iterable[str], tolerance_mode='liberal', area_ha=1.0, output_dir=None):
         results = {}
@@ -383,6 +394,59 @@ class HerbicideRecommendationSystem:
             "dosage_per_ha": ZONES[zone]["dosage"]
         }
 
+def evaluate_superpixel_decisions(superpixel_labels: np.ndarray,
+                                  weed_probs: np.ndarray,
+                                  ground_truth: np.ndarray,
+                                  weed_id: int,
+                                  threshold: float = 0.10) -> dict:
+    """
+    Calcola AQ, Over-spraying e Under-spraying basandosi sulle decisioni
+    prese a livello di superpixel data una specifica soglia operativa (tau).
+    """
+    max_label = int(superpixel_labels.max())
+    
+    total_fp_pixels = 0  # Pixel sani spruzzati per errore (Spreco)
+    total_fn_pixels = 0  # Pixel infestati NON spruzzati (Danno biologico)
+    
+    total_clean_pixels_in_gt = (ground_truth != weed_id).sum()
+    total_weed_pixels_in_gt = (ground_truth == weed_id).sum()
+    
+    aq_total = 0.0
+    
+    for label in range(1, max_label + 1):
+        mask = superpixel_labels == label
+        if not mask.any():
+            continue
+        
+        # 1. Realtà del Ground Truth nel superpixel
+        true_weed_count = (ground_truth[mask] == weed_id).sum()
+        superpixel_area = mask.sum()
+        
+        # 2. Decisione del sistema in base alla probabilità media e alla soglia tau
+        mean_prob = float(weed_probs[mask].mean())
+        is_treated = mean_prob >= threshold
+        
+        # 3. Accumulo errori basato sull'impatto reale dei pixel
+        if is_treated:
+            # Se spruzzi il superpixel, i pixel sani al suo interno sono False Positives
+            total_fp_pixels += (superpixel_area - true_weed_count)
+            aq_total += abs(superpixel_area - true_weed_count)
+        else:
+            # Se NON lo spruzzi, i pixel infestati al suo interno sono False Negatives
+            total_fn_pixels += true_weed_count
+            aq_total += true_weed_count
+
+    # Calcolo dei tassi globali rispetto al totale dei pixel dell'immagine
+    over_spray_rate = total_fp_pixels / total_clean_pixels_in_gt if total_clean_pixels_in_gt > 0 else 0.0
+    under_spray_rate = total_fn_pixels / total_weed_pixels_in_gt if total_weed_pixels_in_gt > 0 else 0.0
+    
+    #print(f"DEBUG - Pixel Erbacce nel GT: {total_weed_pixels_in_gt}, Pixel FN (Mancati): {total_fn_pixels}")
+
+    return {
+        "aq_spatial_absolute": float(aq_total),
+        "overspreading_rate": float(over_spray_rate),
+        "underspreading_rate": float(under_spray_rate)
+    }
 # Esempio di utilizzo
 if __name__ == "__main__":
     import argparse

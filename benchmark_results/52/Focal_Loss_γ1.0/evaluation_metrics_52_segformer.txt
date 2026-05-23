@@ -1,0 +1,7 @@
+Image: 52.png
+Model: segformer (variant: focal_gamma1.0)
+Superpixels: 181
+ECE: 0.3194
+AQ Spatial Absolute: 1398.00
+Over-spraying Rate: 0.0053
+Under-spraying Rate: 0.0000

@@ -1,6 +1,6 @@
 import random
 import click
-
+import numpy as np
 
 @click.group()
 def cli():
@@ -105,7 +105,7 @@ def calibrate(model, calibration_tecnique, num_epochs, checkpoint):
 @click.option("--sigma", type=float, default=1.0, help="SLIC smoothing sigma")
 @click.option("--gsd-m", type=float, default=0.05, help="Ground Sampling Distance in meters/pixel")
 @click.option("--tolerance-mode", type=str, default="conservative", help="Tolerance mode for coverage adjustment")
-@click.option("--accuracy", type=float, default=0.8, help="Model accuracy for tolerance adjustment")
+@click.option("--accuracy", type=float, default=0.99, help="Model accuracy for tolerance adjustment")
 def infer_superpixels(model, model_variant, checkpoint, calibration_file, image, output_dir, num_segments, compactness, sigma, gsd_m, tolerance_mode, accuracy):
     """Esegui inferenza superpixel ed effettua la raccomandazione erbicida."""
     from recCide import HerbicideRecommendationSystem
@@ -137,86 +137,153 @@ def infer_superpixels(model, model_variant, checkpoint, calibration_file, image,
 
 
 @cli.command("benchmark-superpixels")
-@click.option("--image", type=str, required=True, help="Path to input RGB image")
-@click.option("--ground-truth", type=str, required=True, help="Path to ground truth")
+@click.option("--image-dir", type=str, default=None, help="Path to directory with RGB images")
+@click.option("--ground-truth-dir", type=str, default=None, help="Path to directory with ground truth images")
+@click.option("--image", type=str, default=None, help="Path to single RGB image (alternative to --image-dir)")
+@click.option("--ground-truth", type=str, default=None, help="Path to single ground truth (alternative to --ground-truth-dir)")
 @click.option("--output-dir", type=str, default="benchmark_results", help="Output directory for results")
 @click.option("--num-segments", type=int, default=200, help="Number of superpixels")
 @click.option("--gsd-m", type=float, default=0.05, help="Ground Sampling Distance in meters/pixel")
 @click.option("--accuracy", type=float, default=0.8, help="Model accuracy")
-def benchmark_superpixels(image, ground_truth, output_dir, num_segments, gsd_m, accuracy):
-    """Esegui benchmark comparativo: modello base vs calibrato vs focal."""
+def benchmark_superpixels(image_dir, ground_truth_dir, image, ground_truth, output_dir, num_segments, gsd_m, accuracy):
+    """Esegui benchmark comparativo con THRESHOLD SWEEP: modello base vs calibrato vs focal."""
     import os
+    import glob
+    import numpy as np
+    from pathlib import Path
     from recCide import HerbicideRecommendationSystem
 
     id2label = {0: "background", 1: "crop", 2: "weed"}
     
     models_to_test = [
         {"name": "segformer", "variant": None, "label": "Base (non calibrato)"},
+        {"name": "segformer", "variant": None, "label": "Temp Scaling", "calibration": "weights/segformer_calibrated_n30_temperature_scaling.pkl"},
         {"name": "segformer", "variant": "focal_gamma1.0", "label": "Focal Loss γ=1.0"},
         {"name": "segformer", "variant": "focal_gamma2.0", "label": "Focal Loss γ=2.0"},
         {"name": "segformer", "variant": "focal_gamma2.0", "label": "Focal + Temp Scaling", "calibration": "weights/segformer_calibrated_n30_temperature_scaling.pkl"},
     ]
     
+    # Definiamo il range di soglie (tau) per misurare la libertà dell'agricoltore
+    thresholds_to_sweep = [0.02, 0.05, 0.08, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50]
+    
     os.makedirs(output_dir, exist_ok=True)
-    results_summary = []
     
-    # Estrai il nome dell'immagine base per l'output
-    image_base_name = os.path.splitext(os.path.basename(image))[0]
+    if image and ground_truth:
+        image_gt_pairs = [(image, ground_truth)]
+        print(f"Modalità: singola immagine")
+    elif image_dir and ground_truth_dir:
+        if not os.path.isdir(image_dir) or not os.path.isdir(ground_truth_dir):
+            print(f"Errore: le directory non esistono")
+            return
+        image_files = sorted(glob.glob(os.path.join(image_dir, "*.png")) + glob.glob(os.path.join(image_dir, "*.jpg")))
+        if not image_files:
+            print(f"Errore: nessuna immagine trovata in {image_dir}")
+            return
+        image_gt_pairs = []
+        for img_path in image_files:
+            img_name = Path(img_path).stem
+            gt_path = os.path.join(ground_truth_dir, f"{img_name}.png")
+            if os.path.exists(gt_path):
+                image_gt_pairs.append((img_path, gt_path))
+            else:
+                print(f"Avviso: ground truth non trovato per {img_path}")
+        print(f"Modalità: cartella con {len(image_gt_pairs)} coppie immagine-ground_truth")
+    else:
+        print("Errore: fornire --image e --ground-truth oppure --image-dir e --ground-truth-dir")
+        return
     
-    for config in models_to_test:
-        model_name = config["name"]
-        variant = config["variant"]
-        label = config["label"]
-        calibration_file = config.get("calibration", None)
-        
-        print(f"\n=== Testing: {label} ===")
-        
-        system = HerbicideRecommendationSystem(
-            model_name=model_name,
-            id2label=id2label,
-            model_variant=variant,
-            accuracy=accuracy,
-            calibration_file=calibration_file,
-        )
-        
-        eval_subdir = os.path.join(output_dir, label.replace(" ", "_").replace("=", ""))
-        metrics = system.evaluate_superpixels(
-            image,
-            ground_truth,
-            num_segments=num_segments,
-            gsd_m=gsd_m,
-            output_dir=eval_subdir,
-        )
-        
-        results_summary.append({
-            "model": label,
-            "ece": metrics["ece"],
-            "aq_spatial_absolute": metrics["aq_spatial_absolute"],
-            "overspreading_rate": metrics["overspreading_rate"],
-            "underspreading_rate": metrics["underspreading_rate"],
-        })
-        
-        print(f"ECE: {metrics['ece']:.4f}")
-        print(f"AQ (Spatial Absolute): {metrics['aq_spatial_absolute']:.2f}")
-        print(f"Over-spraying: {metrics['overspreading_rate']:.4f}")
-        print(f"Under-spraying: {metrics['underspreading_rate']:.4f}")
+    all_results_summary = []
     
-    summary_path = os.path.join(output_dir, f"benchmark_summary_{image_base_name}.csv")
-    with open(summary_path, "w") as f:
-        headers = ["Model", "ECE", "AQ_Spatial_Absolute", "Over_spraying", "Under_spraying"]
-        f.write(",".join(headers) + "\n")
-        for row in results_summary:
-            values = [
-                row["model"],
-                f"{row['ece']:.4f}",
-                f"{row['aq_spatial_absolute']:.2f}",
-                f"{row['overspreading_rate']:.4f}",
-                f"{row['underspreading_rate']:.4f}",
-            ]
-            f.write(",".join(values) + "\n")
+    for img_idx, (img_path, gt_path) in enumerate(image_gt_pairs, 1):
+        image_base_name = os.path.splitext(os.path.basename(img_path))[0]
+        print(f"\n{'='*60}")
+        print(f"Immagine {img_idx}/{len(image_gt_pairs)}: {image_base_name}")
+        print(f"{'='*60}")
+        
+        results_summary = []
+        
+        for config in models_to_test:
+            model_name = config["name"]
+            variant = config["variant"]
+            label = config["label"]
+            calibration_file = config.get("calibration", None)
+            
+            print(f"\n=== Testing: {label} ===")
+            
+            system = HerbicideRecommendationSystem(
+                model_name=model_name,
+                id2label=id2label,
+                model_variant=variant,
+                accuracy=accuracy,
+                calibration_file=calibration_file,
+            )
+            
+            # Eseguiamo lo sweep su tutte le soglie per questo modello
+            for tau in thresholds_to_sweep:
+                print(f"  Valutazione con Soglia \u03c4 = {tau:.2f}...")
+                
+                eval_subdir = os.path.join(output_dir, image_base_name, label.replace(" ", "_").replace("=", ""), f"tau_{tau:.2f}")
+                
+                # NOTA: Assicurati che il metodo evaluate_superpixels in recCide.py 
+                # accetti il parametro 'threshold' e usi la nuova logica che abbiamo scritto!
+                metrics = system.evaluate_superpixels(
+                    img_path,
+                    gt_path,
+                    num_segments=num_segments,
+                    gsd_m=gsd_m,
+                    output_dir=eval_subdir,
+                    threshold=tau, 
+                )
+                
+                results_summary.append({
+                    "image": image_base_name,
+                    "model": label,
+                    "threshold": tau,
+                    "ece": metrics["ece"],
+                    "aq_spatial_absolute": metrics["aq_spatial_absolute"],
+                    "overspreading_rate": metrics["overspreading_rate"],
+                    "underspreading_rate": metrics["underspreading_rate"],
+                })
+                all_results_summary.append(results_summary[-1])
+        
+        # Salva il riepilogo per questa immagine includendo la colonna Threshold
+        summary_path = os.path.join(output_dir, f"benchmark_summary_{image_base_name}.csv")
+        with open(summary_path, "w") as f:
+            headers = ["Model", "Threshold", "ECE", "AQ_Spatial_Absolute", "Over_spraying", "Under_spraying"]
+            f.write(",".join(headers) + "\n")
+            for row in results_summary:
+                values = [
+                    row["model"],
+                    f"{row['threshold']:.2f}",
+                    f"{row['ece']:.4f}",
+                    f"{row['aq_spatial_absolute']:.2f}",
+                    f"{row['overspreading_rate']:.4f}",
+                    f"{row['underspreading_rate']:.4f}",
+                ]
+                f.write(",".join(values) + "\n")
+        
+        print(f"\nRiepilogo con Sweep per {image_base_name} salvato in: {summary_path}")
     
-    print(f"\n=== Benchmark completato ===")
-    print(f"Riepilogo salvato in: {summary_path}")
+    # Salva il riepilogo aggregato se ci sono più immagini
+    if len(image_gt_pairs) > 1:
+        aggregate_summary_path = os.path.join(output_dir, "benchmark_summary_aggregate.csv")
+        with open(aggregate_summary_path, "w") as f:
+            headers = ["Image", "Model", "Threshold", "ECE", "AQ_Spatial_Absolute", "Over_spraying", "Under_spraying"]
+            f.write(",".join(headers) + "\n")
+            for row in all_results_summary:
+                values = [
+                    str(row["image"]),
+                    str(row["model"]),
+                    f"{row['threshold']:.2f}",
+                    f"{row['ece']:.4f}",  # <-- CORRETTO: Ora scrive il valore dell'ECE, non il nome del modello!
+                    f"{row['aq_spatial_absolute']:.2f}",
+                    f"{row['overspreading_rate']:.4f}",
+                    f"{row['underspreading_rate']:.4f}",
+                ]
+                f.write(",".join(values) + "\n")
+        print(f"\nRiepilogo aggregato salvato in: {aggregate_summary_path}")
+
+    print(f"\n{'='*60}\n=== Benchmark completato ===\n{'='*60}")
 
 
 @cli.command("evaluate")
