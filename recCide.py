@@ -26,6 +26,15 @@ from calweed.superpixel import (
 )
 
 class HerbicideRecommendationSystem:
+    # Mappatura threshold → file di calibrazione per valutazione superpixel
+    THRESHOLD_CALIBRATION_MAP = {
+        0.10: "weights/segformer_focal_gamma2.0.pth",
+        0.20: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
+        0.30: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
+        0.40: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
+        0.50: "weights/segformer_calibrated_n30_temperature_scaling_ckpt_segformer_focal_gamma2.pkl",
+    }
+    
     def __init__(self, model_name, id2label, model_variant=None, accuracy=0.9, 
                  calibration_file=None, checkpoint_path=None):
         """
@@ -47,7 +56,8 @@ class HerbicideRecommendationSystem:
         self.id2label = id2label
         self.model_variant = model_variant
         self.accuracy = accuracy  # Accuracy del modello, da fornire o calcolare
-        self.calibration_params = None  # Parametri di calibrazione
+        self.calibration_params = None  # Parametri di calibrazione (default per raccomandazione)
+        self.threshold_calibrations = {}  # Cache di calibrazioni per threshold
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         if checkpoint_path:
@@ -88,6 +98,40 @@ class HerbicideRecommendationSystem:
         else:
             print(f"Attenzione: file di calibrazione {calibrated_path} non trovato")
             self.calibration_params = None
+    
+    def load_calibration_for_threshold(self, threshold: float):
+        """
+        Carica i parametri di calibrazione specifici per un dato threshold.
+        Implementa cache per evitare ricaricamenti multipli.
+        
+        Args:
+            threshold: valore del threshold (0.10, 0.20, 0.30, 0.40, 0.50)
+            
+        Returns:
+            Parametri di calibrazione caricati dal file, o None se non trovato
+        """
+        # Controlla se è già in cache
+        if threshold in self.threshold_calibrations:
+            return self.threshold_calibrations[threshold]
+        
+        # Se threshold non è nella mappa, ritorna None
+        if threshold not in self.THRESHOLD_CALIBRATION_MAP:
+            print(f"⚠️  Threshold {threshold} non ha calibrazione mappata. Usando calibrazione di default.")
+            return self.calibration_params
+        
+        calib_file = self.THRESHOLD_CALIBRATION_MAP[threshold]
+        calib_path = calib_file if os.path.isabs(calib_file) else os.path.join(self.root_dir, calib_file)
+        
+        if os.path.exists(calib_path):
+            with open(calib_path, 'rb') as f:
+                params = pickle.load(f)
+            self.threshold_calibrations[threshold] = params
+            print(f"✓ Caricata calibrazione per threshold={threshold}: {calib_path}")
+            return params
+        else:
+            print(f"⚠️  Calibrazione non trovata per threshold={threshold}: {calib_path}")
+            self.threshold_calibrations[threshold] = None
+            return None
 
     def _apply_calibration(self, logits):
         if self.calibration_params is None:
@@ -226,16 +270,25 @@ class HerbicideRecommendationSystem:
                              sigma: float = 1.0, 
                              gsd_m: float = 0.05,
                              output_dir: str = "evaluation_outputs",
-                             threshold: float = 0.10) -> dict: # <-- Cambiato qui, accettiamo threshold dal main
+                             threshold: float = 0.20) -> dict:
         """
         Valuta le performance spaziali del modello sul campionamento a superpixel
         eseguendo il calcolo dinamico in base alla soglia dell'agricoltore.
+        
+        La calibrazione cambia dinamicamente in base al threshold fornito.
         """
         import cv2
         from skimage.segmentation import slic
         from calweed.calibration_metrics import expected_calibration_error_superpixel
 
         os.makedirs(output_dir, exist_ok=True)
+        
+        # Carica calibrazione specifica per il threshold (una sola volta)
+        print(f"\n📊 Caricamento calibrazione per threshold={threshold}...")
+        threshold_calibration = self.load_calibration_for_threshold(threshold)
+        # Salva la calibrazione corrente e usa quella del threshold
+        original_calibration = self.calibration_params
+        self.calibration_params = threshold_calibration
         
         # 1. Caricamento immagine e Ground Truth
         image = cv2.imread(image_path)
@@ -284,8 +337,11 @@ class HerbicideRecommendationSystem:
             weed_probs=weed_probs,
             ground_truth=gt,
             weed_id=weed_id,
-            threshold=threshold # <-- Applica la soglia dinamica passata dal main
+            threshold=threshold
         )
+        
+        # Ripristina la calibrazione originale
+        self.calibration_params = original_calibration
         
         # Salvataggio visivo opzionale (puoi tenerlo o rimuoverlo se rallenta lo sweep)
         # save_superpixel_segmentation(image_rgb, superpixel_labels, os.path.join(output_dir, "segmentation.png"))
@@ -501,6 +557,14 @@ if __name__ == "__main__":
         choices=["conservative", "liberal"],
         default="liberal",
         help="Modalità di tolleranza"
+    )
+
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        choices=[0.10, 0.20, 0.30, 0.40, 0.50],
+        default=0.20,
+        help="Soglia operativa (tau) per la valutazione superpixel (solo per modalità superpixels)"
     )
     
     args = parser.parse_args()
