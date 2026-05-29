@@ -108,6 +108,172 @@ def visualize_superpixels(superpixel_labels: np.ndarray, image_rgb: Image.Image 
     # return segmented_pil
 
 
+def get_superpixel_states(superpixel_labels: np.ndarray, weed_probs: np.ndarray, threshold: float) -> Dict[int, bool]:
+    """
+    Determina lo stato di ogni superpixel (infestato=True, libero=False) basato sulla soglia.
+    
+    Args:
+        superpixel_labels: matrice dei label dei superpixel
+        weed_probs: matrice delle probabilità di erbaccia per pixel
+        threshold: soglia per determinare se un superpixel è infestato
+    
+    Returns:
+        Dizionario {label: is_treated} dove True = infestato, False = libero
+    """
+    max_label = int(superpixel_labels.max())
+    states = {}
+    
+    for label in range(1, max_label + 1):
+        mask = superpixel_labels == label
+        if not mask.any():
+            continue
+        mean_prob = float(weed_probs[mask].mean())
+        states[label] = mean_prob >= threshold
+    
+    return states
+
+
+def get_adjacent_superpixels(superpixel_labels: np.ndarray) -> Dict[int, set]:
+    """
+    Calcola la mappa di adiacenza tra superpixel (4-connessione).
+    
+    Args:
+        superpixel_labels: matrice dei label dei superpixel
+    
+    Returns:
+        Dizionario {label: set di label adiacenti}
+    """
+    h, w = superpixel_labels.shape
+    adjacency = {}
+    
+    max_label = int(superpixel_labels.max())
+    for label in range(1, max_label + 1):
+        adjacency[label] = set()
+    
+    # Controlla adiacenza verticale
+    for i in range(h - 1):
+        for j in range(w):
+            label1 = superpixel_labels[i, j]
+            label2 = superpixel_labels[i + 1, j]
+            if label1 != label2:
+                adjacency[label1].add(label2)
+                adjacency[label2].add(label1)
+    
+    # Controlla adiacenza orizzontale
+    for i in range(h):
+        for j in range(w - 1):
+            label1 = superpixel_labels[i, j]
+            label2 = superpixel_labels[i, j + 1]
+            if label1 != label2:
+                adjacency[label1].add(label2)
+                adjacency[label2].add(label1)
+    
+    return adjacency
+
+
+def merge_adjacent_superpixels(superpixel_labels: np.ndarray, states: Dict[int, bool]) -> np.ndarray:
+    """
+    Unisce superpixel adiacenti che hanno lo stesso stato (infestato/libero).
+    
+    Args:
+        superpixel_labels: matrice dei label dei superpixel
+        states: dizionario {label: is_treated} dello stato di ogni superpixel
+    
+    Returns:
+        Nuova matrice di label con superpixel uniti
+    """
+    adjacency = get_adjacent_superpixels(superpixel_labels)
+    
+    # Union-Find per merge
+    parent = {}
+    max_label = int(superpixel_labels.max())
+    
+    for label in range(1, max_label + 1):
+        parent[label] = label
+    
+    def find(x):
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+    
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+    
+    # Merge superpixel adiacenti con lo stesso stato
+    for label in range(1, max_label + 1):
+        for adjacent_label in adjacency.get(label, set()):
+            if states.get(label) == states.get(adjacent_label):
+                union(label, adjacent_label)
+    
+    # Crea una mappa di rimapping (old_label -> new_label)
+    remap = {}
+    new_label_counter = 1
+    for label in range(1, max_label + 1):
+        root = find(label)
+        if root not in remap:
+            remap[root] = new_label_counter
+            new_label_counter += 1
+        remap[label] = remap[root]
+    
+    # Applica il remapping
+    merged_labels = np.zeros_like(superpixel_labels)
+    for label in range(1, max_label + 1):
+        mask = superpixel_labels == label
+        merged_labels[mask] = remap[label]
+    
+    return merged_labels
+
+
+def visualize_superpixels_by_state(superpixel_labels: np.ndarray, weed_probs: np.ndarray, 
+                                    threshold: float, image_rgb: Image.Image = None) -> Image.Image:
+    """
+    Visualizza i superpixel colorati in base al loro stato (infestato/libero).
+    
+    Args:
+        superpixel_labels: matrice dei label dei superpixel
+        weed_probs: matrice delle probabilità di erbaccia
+        threshold: soglia per determinare se un superpixel è infestato
+        image_rgb: immagine RGB originale (opzionale, per overlay)
+    
+    Returns:
+        PIL Image con superpixel colorati per stato
+    """
+    states = get_superpixel_states(superpixel_labels, weed_probs, threshold)
+    max_label = int(superpixel_labels.max())
+    
+    # Crea immagine colorata
+    h, w = superpixel_labels.shape
+    colored_image = np.zeros((h, w, 3), dtype=np.uint8)
+    
+    for label in range(1, max_label + 1):
+        mask = superpixel_labels == label
+        if not mask.any():
+            continue
+        # Rosso per infestato, Verde per libero
+        color = [255, 0, 0] if states.get(label, False) else [0, 255, 0]
+        colored_image[mask] = color
+    
+    # Aggiungi bordi se disponibile immagine originale
+    if image_rgb is not None:
+        image_np = np.asarray(image_rgb)
+        if image_np.max() > 1:
+            image_normalized = image_np / 255.0
+        else:
+            image_normalized = image_np
+        
+        # mark_boundaries ritorna immagine normalizzata (0-1)
+        segmented = mark_boundaries(image_normalized, superpixel_labels, color=(1, 1, 1), mode='outer')
+        colored_float = colored_image.astype(np.float32) / 255.0
+        
+        # Blend: 70% colore, 30% bordi
+        blended = 0.7 * colored_float + 0.3 * segmented
+        colored_image = (blended * 255).astype(np.uint8)
+    
+    return Image.fromarray(colored_image, mode="RGB")
+
+
 def save_superpixel_segmentation(superpixel_labels: np.ndarray, image_rgb: Image.Image, 
                                  output_dir: str, filename: str = None, image_name: str = None):
     """
