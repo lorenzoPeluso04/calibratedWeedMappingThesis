@@ -23,6 +23,9 @@ from calweed.superpixel import (
     pixels_to_area_m2,
     pixels_to_area_ha,
     save_superpixel_segmentation,
+    get_superpixel_states,
+    merge_adjacent_superpixels,
+    visualize_superpixels_by_state,
 )
 
 class HerbicideRecommendationSystem:
@@ -213,7 +216,22 @@ class HerbicideRecommendationSystem:
 
     def recommend_superpixels(self, image: Union[str, np.ndarray, Image.Image], num_segments: int = 200,
                               compactness: float = 10.0, sigma: float = 1.0, tolerance_mode: str = 'liberal',
-                              gsd_m: float = 0.05, output_dir: Optional[str] = None):
+                              gsd_m: float = 0.05, output_dir: Optional[str] = None, 
+                              ground_truth_path: Optional[str] = None, threshold: float = 0.20):
+        """
+        Sistema di raccomandazione superpixel con valutazione e visualizzazione.
+        
+        Args:
+            image: path, PIL Image o numpy array dell'immagine
+            num_segments: numero di superpixel
+            compactness: compattezza dei superpixel
+            sigma: sigma per SLIC
+            tolerance_mode: modalità di tolleranza
+            gsd_m: Ground Sampling Distance in m/pixel
+            output_dir: directory di output
+            ground_truth_path: path alla ground truth (opzionale, per valutazione)
+            threshold: soglia tau per determinare se un superpixel è infestato
+        """
         image_path = None
         if isinstance(image, str):
             image_path = image
@@ -221,21 +239,39 @@ class HerbicideRecommendationSystem:
         elif hasattr(image, 'filename'):
             image_path = image.filename
 
+        # Inferenza
         preds, probs = self.predict(image, return_probs=True)
         weed_id = next(k for k, v in self.id2label.items() if v == "weed")
         weed_probs = probs[weed_id].cpu().numpy()
 
-        labels = compute_superpixels(image, num_segments=num_segments, compactness=compactness, sigma=sigma)
-        stats = superpixel_statistics(labels, weed_probs, gsd_m=gsd_m)
+        # Superpixel classici
+        labels_original = compute_superpixels(image, num_segments=num_segments, compactness=compactness, sigma=sigma)
+        stats = superpixel_statistics(labels_original, weed_probs, gsd_m=gsd_m)
 
-        total_usage = sum(item["usage_L"] for item in stats)
-        total_area_ha = sum(item["area_ha"] for item in stats)
+        # Calcolo stato superpixel e merge
+        states = get_superpixel_states(labels_original, weed_probs, threshold)
+        labels_merged = merge_adjacent_superpixels(labels_original, states)
+
+        # Statistiche per superpixel originali e merged
+        stats_original = superpixel_statistics(labels_original, weed_probs, gsd_m=gsd_m)
+        stats_merged = superpixel_statistics(labels_merged, weed_probs, gsd_m=gsd_m)
+
+        total_usage_original = sum(item["usage_L"] for item in stats_original)
+        total_area_ha_original = sum(item["area_ha"] for item in stats_original)
+        
+        total_usage_merged = sum(item["usage_L"] for item in stats_merged)
+        total_area_ha_merged = sum(item["area_ha"] for item in stats_merged)
 
         result = {
-            "n_superpixels": len(stats),
-            "total_area_ha": total_area_ha,
-            "total_herbicide_usage_L": total_usage,
-            "superpixel_stats": stats,
+            "n_superpixels_original": len(stats_original),
+            "total_area_ha_original": total_area_ha_original,
+            "total_herbicide_usage_L_original": total_usage_original,
+            "superpixel_stats_original": stats_original,
+            
+            "n_superpixels_merged": len(stats_merged),
+            "total_area_ha_merged": total_area_ha_merged,
+            "total_herbicide_usage_L_merged": total_usage_merged,
+            "superpixel_stats_merged": stats_merged,
         }
 
         if output_dir:
@@ -245,20 +281,75 @@ class HerbicideRecommendationSystem:
             image_name = os.path.basename(image_path) if image_path else "image"
             base_name = os.path.splitext(image_name)[0]
             
-            # Salva l'immagine segmentata in cartella "segmented"
-            segmented_path = save_superpixel_segmentation(labels, image, output_dir, image_name=image_name)
-            print(f"Immagine superpixel salvata in: {segmented_path}")
+            # 1. Salva l'immagine superpixel classica con colori per stato
+            colored_original = visualize_superpixels_by_state(labels_original, weed_probs, threshold, image)
+            colored_original_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_superpixel_original_state.png")
+            colored_original.save(colored_original_path)
+            print(f"✓ Superpixel originali (colorati per stato) salvati in: {colored_original_path}")
             
-            # Salva il report CSV
-            report_path = os.path.join(output_dir, f"superpixel_recommendation_{base_name}_{self.model_name}.csv")
-            with open(report_path, "w") as f:
+            # 2. Salva l'immagine superpixel merged con colori per stato
+            colored_merged = visualize_superpixels_by_state(labels_merged, weed_probs, threshold, image)
+            colored_merged_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_superpixel_merged_state.png")
+            colored_merged.save(colored_merged_path)
+            print(f"✓ Superpixel uniti (colorati per stato) salvati in: {colored_merged_path}")
+            
+            # 3. Salva immagine superpixel originale con bordi
+            segmented_original = save_superpixel_segmentation(labels_original, image, output_dir, 
+                                                             filename=f"{base_name}_tau_{threshold}_superpixel_original_borders.png")
+            print(f"✓ Superpixel originali (con bordi) salvati in: {segmented_original}")
+            
+            # 4. Salva immagine superpixel merged con bordi
+            from skimage.segmentation import mark_boundaries
+            image_np = np.asarray(image)
+            if image_np.max() > 1:
+                image_normalized = image_np / 255.0
+            else:
+                image_normalized = image_np
+            segmented_merged_array = mark_boundaries(image_normalized, labels_merged, color=(0, 1, 1), mode='outer')
+            segmented_merged_pil = Image.fromarray((segmented_merged_array * 255).astype(np.uint8), mode="RGB")
+            segmented_merged_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_superpixel_merged_borders.png")
+            segmented_merged_pil.save(segmented_merged_path)
+            print(f"✓ Superpixel uniti (con bordi) salvati in: {segmented_merged_path}")
+            
+            # Salva il report CSV per superpixel originali
+            report_original_path = os.path.join(output_dir, f"superpixel_recommendation_original_{base_name}_{self.model_name}.csv")
+            with open(report_original_path, "w") as f:
                 headers = ["label", "mean_weed_prob", "pixel_count", "area_m2", "area_ha", "zone", "usage_L"]
-                f.write(",".join(headers) + "\n"
-                )
-                for item in stats:
+                f.write(",".join(headers) + "\n")
+                for item in stats_original:
                     row = [str(item[h]) for h in headers]
                     f.write(",".join(row) + "\n")
-            print(f"Report superpixel salvato in: {report_path}")
+            print(f"✓ Report superpixel originali salvato in: {report_original_path}")
+            
+            # Salva il report CSV per superpixel merged
+            report_merged_path = os.path.join(output_dir, f"superpixel_recommendation_merged_{base_name}_{self.model_name}.csv")
+            with open(report_merged_path, "w") as f:
+                headers = ["label", "mean_weed_prob", "pixel_count", "area_m2", "area_ha", "zone", "usage_L"]
+                f.write(",".join(headers) + "\n")
+                for item in stats_merged:
+                    row = [str(item[h]) for h in headers]
+                    f.write(",".join(row) + "\n")
+            print(f"✓ Report superpixel uniti salvato in: {report_merged_path}")
+            
+            # Esegui valutazione se ground truth è fornito
+            if ground_truth_path:
+                print(f"\n📊 Esecuzione valutazione superpixel con threshold={threshold}...")
+                evaluation_result = self.evaluate_superpixels(
+                    image_path=image_path,
+                    ground_truth_path=ground_truth_path,
+                    num_segments=num_segments,
+                    compactness=compactness,
+                    sigma=sigma,
+                    gsd_m=gsd_m,
+                    output_dir=output_dir,
+                    threshold=threshold
+                )
+                result["evaluation"] = evaluation_result
+                print(f"📊 Valutazione completata:")
+                print(f"   ECE: {evaluation_result['ece']:.4f}")
+                print(f"   AQ Spatial Absolute: {evaluation_result['aq_spatial_absolute']:.4f}")
+                print(f"   Over-spraying rate: {evaluation_result['overspreading_rate']:.4f}")
+                print(f"   Under-spraying rate: {evaluation_result['underspreading_rate']:.4f}")
 
         return result
 
@@ -599,12 +690,26 @@ if __name__ == "__main__":
             num_segments=args.num_segments,
             gsd_m=args.gsd_m,
             tolerance_mode=args.tolerance_mode,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            ground_truth_path=args.ground_truth,
+            threshold=args.threshold
         )
-        print("📊 RISULTATI RACCOMANDAZIONE SUPERPIXEL:")
-        print(f"  Numero di superpixel: {result['n_superpixels']}")
-        print(f"  Area totale: {result['total_area_ha']:.6f} ha")
-        print(f"  Uso totale erbicida: {result['total_herbicide_usage_L']:.4f} L")
+        print("\n📊 RISULTATI RACCOMANDAZIONE SUPERPIXEL (ORIGINALI):")
+        print(f"  Numero di superpixel: {result['n_superpixels_original']}")
+        print(f"  Area totale: {result['total_area_ha_original']:.6f} ha")
+        print(f"  Uso totale erbicida: {result['total_herbicide_usage_L_original']:.4f} L")
+        
+        print("\n📊 RISULTATI RACCOMANDAZIONE SUPERPIXEL (UNITI):")
+        print(f"  Numero di superpixel: {result['n_superpixels_merged']}")
+        print(f"  Area totale: {result['total_area_ha_merged']:.6f} ha")
+        print(f"  Uso totale erbicida: {result['total_herbicide_usage_L_merged']:.4f} L")
+        
+        if "evaluation" in result:
+            print("\n📊 METRICHE DI VALUTAZIONE:")
+            print(f"  ECE: {result['evaluation']['ece']:.4f}")
+            print(f"  AQ Spatial Absolute: {result['evaluation']['aq_spatial_absolute']:.4f}")
+            print(f"  Over-spraying rate: {result['evaluation']['overspreading_rate']:.4f}")
+            print(f"  Under-spraying rate: {result['evaluation']['underspreading_rate']:.4f}")
         
     else:
         # Raccomandazione standard a livello di pixel
