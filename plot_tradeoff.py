@@ -27,7 +27,7 @@ def clean_spines(ax):
     ax.spines['right'].set_visible(False)
 
 # Carica i dati
-csv_path = "benchmark_results/benchmark_summary_aggregate.csv"
+csv_path = "benchmark_results/benchmark_summary_aggregate_20segments.csv"
 if not os.path.exists(csv_path):
     csv_path = "benchmark_summary_aggregate.csv" 
 
@@ -57,13 +57,13 @@ for model in models:
              linewidth=2.5, linestyle='--', label=model, color=model_colors.get(model, '#000000'))
 
 # Configurazione Grafico Over-spraying
-ax1.set_title("Spreco di Erbicida (Over-spraying Rate)", pad=15)
+ax1.set_title("Spreco di Erbicida (Over-spraying Rate) (20 segments)", pad=15)
 ax1.set_xlabel(r"Soglia Operativa $\tau$", labelpad=10)
 ax1.set_ylabel("Pixel Sani Trattati (%)")
 clean_spines(ax1)
 
 # Configurazione Grafico Under-spraying
-ax2.set_title("Erbacce Non Trattate (Under-spraying Rate)", pad=15)
+ax2.set_title("Erbacce Non Trattate (Under-spraying Rate) (20 segments)", pad=15)
 ax2.set_xlabel(r"Soglia Operativa $\tau$", labelpad=10)
 ax2.set_ylabel("Pixel Infestati Mancati (%)")
 clean_spines(ax2)
@@ -73,7 +73,7 @@ plt.tight_layout()
 
 # Salvataggio
 os.makedirs("evaluation_outputs", exist_ok=True)
-output_plot = "evaluation_outputs/tradeoff_curves_thesis.png"
+output_plot = "evaluation_outputs/tradeoff_curves_thesis_20segments.png"
 plt.savefig(output_plot, dpi=300, bbox_inches='tight')
 print(f"🎉 Grafico 1 salvato con successo in: {output_plot}")
 plt.show()
@@ -141,7 +141,7 @@ ax3.legend(loc='lower right', frameon=True, facecolor='white', edgecolor='#ddddd
 props = dict(boxstyle='round,pad=0.8', facecolor='#fbf8cc', edgecolor='#e3d5ca', alpha=0.85)
 
 plt.tight_layout()
-output_dca = "evaluation_outputs/decision_curve_analysis_net_benefit.png"
+output_dca = "evaluation_outputs/decision_curve_analysis_net_benefit_20segments.png"
 plt.savefig(output_dca, dpi=300, bbox_inches='tight')
 
 print(f"🎉 Grafico 2 (DCA Net Benefit Mediato) salvato con successo in: {output_dca}")

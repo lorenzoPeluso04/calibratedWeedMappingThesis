@@ -247,7 +247,7 @@ def benchmark_superpixels(image_dir, ground_truth_dir, image, ground_truth, outp
                 all_results_summary.append(results_summary[-1])
         
         # Salva il riepilogo per questa immagine includendo la colonna Threshold
-        summary_path = os.path.join(output_dir, f"benchmark_summary_{image_base_name}.csv")
+        summary_path = os.path.join(output_dir, f"benchmark_summary_merged_{image_base_name}_{num_segments}.csv")
         with open(summary_path, "w") as f:
             headers = ["Model", "Threshold", "ECE", "AQ_Spatial_Absolute", "Over_spraying", "Under_spraying"]
             f.write(",".join(headers) + "\n")
@@ -266,7 +266,7 @@ def benchmark_superpixels(image_dir, ground_truth_dir, image, ground_truth, outp
     
     # Salva il riepilogo aggregato se ci sono più immagini
     if len(image_gt_pairs) > 1:
-        aggregate_summary_path = os.path.join(output_dir, "benchmark_summary_aggregate.csv")
+        aggregate_summary_path = os.path.join(output_dir, f"benchmark_summary_aggregate_merged_{num_segments}.csv")
         with open(aggregate_summary_path, "w") as f:
             headers = ["Image", "Model", "Threshold", "ECE", "AQ_Spatial_Absolute", "Over_spraying", "Under_spraying"]
             f.write(",".join(headers) + "\n")

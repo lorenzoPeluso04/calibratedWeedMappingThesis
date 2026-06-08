@@ -30,14 +30,22 @@ from calweed.superpixel import (
 
 class HerbicideRecommendationSystem:
     # Mappatura threshold → file di calibrazione per valutazione superpixel
-    THRESHOLD_CALIBRATION_MAP = {
+    """THRESHOLD_CALIBRATION_MAP = {
         0.10: "weights/segformer_focal_gamma2.0.pth",
         0.20: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
         0.30: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
         0.40: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
         0.50: "weights/segformer_calibrated_n30_temperature_scaling_ckpt_segformer_focal_gamma2.pkl",
-    }
+    }"""
     
+    THRESHOLD_CALIBRATION_MAP = {
+        0.10: None,  # Usa calibrazione di default per tau=0.10
+        0.20: None,
+        0.30: None,
+        0.40: None,
+        0.50: None,
+    }
+
     def __init__(self, model_name, id2label, model_variant=None, accuracy=0.9, 
                  calibration_file=None, checkpoint_path=None):
         """
@@ -123,6 +131,13 @@ class HerbicideRecommendationSystem:
             return self.calibration_params
         
         calib_file = self.THRESHOLD_CALIBRATION_MAP[threshold]
+        
+        # Se non c'è calibrazione specifica per questo threshold, usa quella di default
+        if calib_file is None:
+            print(f"⚠️  Threshold {threshold} usa calibrazione di default.")
+            self.threshold_calibrations[threshold] = self.calibration_params
+            return self.calibration_params
+        
         calib_path = calib_file if os.path.isabs(calib_file) else os.path.join(self.root_dir, calib_file)
         
         if os.path.exists(calib_path):
@@ -283,19 +298,19 @@ class HerbicideRecommendationSystem:
             
             # 1. Salva l'immagine superpixel classica con colori per stato
             colored_original = visualize_superpixels_by_state(labels_original, weed_probs, threshold, image)
-            colored_original_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_superpixel_original_state.png")
+            colored_original_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_{num_segments}_superpixel_original_state.png")
             colored_original.save(colored_original_path)
             print(f"✓ Superpixel originali (colorati per stato) salvati in: {colored_original_path}")
             
             # 2. Salva l'immagine superpixel merged con colori per stato
             colored_merged = visualize_superpixels_by_state(labels_merged, weed_probs, threshold, image)
-            colored_merged_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_superpixel_merged_state.png")
+            colored_merged_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_{num_segments}superpixel_merged_state.png")
             colored_merged.save(colored_merged_path)
             print(f"✓ Superpixel uniti (colorati per stato) salvati in: {colored_merged_path}")
             
             # 3. Salva immagine superpixel originale con bordi
             segmented_original = save_superpixel_segmentation(labels_original, image, output_dir, 
-                                                             filename=f"{base_name}_tau_{threshold}_superpixel_original_borders.png")
+                                                             filename=f"{base_name}_tau_{threshold}_{num_segments}_superpixel_original_borders.png")
             print(f"✓ Superpixel originali (con bordi) salvati in: {segmented_original}")
             
             # 4. Salva immagine superpixel merged con bordi
@@ -307,7 +322,7 @@ class HerbicideRecommendationSystem:
                 image_normalized = image_np
             segmented_merged_array = mark_boundaries(image_normalized, labels_merged, color=(0, 1, 1), mode='outer')
             segmented_merged_pil = Image.fromarray((segmented_merged_array * 255).astype(np.uint8), mode="RGB")
-            segmented_merged_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_superpixel_merged_borders.png")
+            segmented_merged_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_{num_segments}_superpixel_merged_borders.png")
             segmented_merged_pil.save(segmented_merged_path)
             print(f"✓ Superpixel uniti (con bordi) salvati in: {segmented_merged_path}")
             
@@ -322,7 +337,7 @@ class HerbicideRecommendationSystem:
             print(f"✓ Report superpixel originali salvato in: {report_original_path}")
             
             # Salva il report CSV per superpixel merged
-            report_merged_path = os.path.join(output_dir, f"superpixel_recommendation_merged_{base_name}_{self.model_name}.csv")
+            report_merged_path = os.path.join(output_dir, f"superpixel_recommendation_merged_{base_name}_{self.model_name}_{num_segments}.csv")
             with open(report_merged_path, "w") as f:
                 headers = ["label", "mean_weed_prob", "pixel_count", "area_m2", "area_ha", "zone", "usage_L"]
                 f.write(",".join(headers) + "\n")
@@ -344,12 +359,32 @@ class HerbicideRecommendationSystem:
                     output_dir=output_dir,
                     threshold=threshold
                 )
-                result["evaluation"] = evaluation_result
-                print(f"📊 Valutazione completata:")
+                result["evaluation_original"] = evaluation_result
+
+
+                print(f"📊 Valutazione completata originale:")
                 print(f"   ECE: {evaluation_result['ece']:.4f}")
                 print(f"   AQ Spatial Absolute: {evaluation_result['aq_spatial_absolute']:.4f}")
                 print(f"   Over-spraying rate: {evaluation_result['overspreading_rate']:.4f}")
                 print(f"   Under-spraying rate: {evaluation_result['underspreading_rate']:.4f}")
+
+                evaluation_result_merged = self.evaluate_superpixels(
+                    image_path=image_path,
+                    ground_truth_path=ground_truth_path,
+                    num_segments=num_segments,
+                    compactness=compactness,
+                    sigma=sigma,
+                    gsd_m=gsd_m,
+                    output_dir=output_dir,
+                    threshold=threshold
+                )
+                result["evaluation_merged"] = evaluation_result_merged
+                print(f"📊 Valutazione completata uniti:"
+                      f"   ECE: {evaluation_result_merged['ece']:.4f}\n"
+                      f"   AQ Spatial Absolute: {evaluation_result_merged['aq_spatial_absolute']:.4f}\n"
+                      f"   Over-spraying rate: {evaluation_result_merged['overspreading_rate']:.4f}\n"
+                      f"   Under-spraying rate: {evaluation_result_merged['underspreading_rate']:.4f}\n")
+                result["evaluation_merged"] = evaluation_result_merged
 
         return result
 
@@ -413,9 +448,13 @@ class HerbicideRecommendationSystem:
         # Trasformiamo il canale della weed in un array numpy compatibile con le metriche
         weed_probs = probs[weed_id].cpu().numpy()
         
+        # 3.5 Applicazione logica di unione superpixel
+        states = get_superpixel_states(superpixel_labels, weed_probs, threshold)
+        superpixel_labels_merged = merge_adjacent_superpixels(superpixel_labels, states)
+        
         # 4. Calcolo dell'ECE (Indipendente dalla soglia)
         ece, acc_bin, conf_bin = expected_calibration_error_superpixel(
-            superpixel_labels=superpixel_labels,
+            superpixel_labels=superpixel_labels_merged,
             weed_probs=weed_probs,
             ground_truth=gt,
             weed_id=weed_id,
@@ -424,7 +463,7 @@ class HerbicideRecommendationSystem:
         
         # 5. Calcolo delle metriche spaziali condizionate dalla soglia dell'agricoltore
         spatial_metrics = evaluate_superpixel_decisions(
-            superpixel_labels=superpixel_labels,
+            superpixel_labels=superpixel_labels_merged,
             weed_probs=weed_probs,
             ground_truth=gt,
             weed_id=weed_id,
@@ -705,7 +744,13 @@ if __name__ == "__main__":
         print(f"  Uso totale erbicida: {result['total_herbicide_usage_L_merged']:.4f} L")
         
         if "evaluation" in result:
-            print("\n📊 METRICHE DI VALUTAZIONE:")
+            print("\n📊 METRICHE DI VALUTAZIONE: (ORIGINALI)")
+            print(f"  ECE: {result['evaluation']['ece']:.4f}")
+            print(f"  AQ Spatial Absolute: {result['evaluation']['aq_spatial_absolute']:.4f}")
+            print(f"  Over-spraying rate: {result['evaluation']['overspreading_rate']:.4f}")
+            print(f"  Under-spraying rate: {result['evaluation']['underspreading_rate']:.4f}")
+
+            print("\n📊 METRICHE DI VALUTAZIONE: (UNITI)")
             print(f"  ECE: {result['evaluation']['ece']:.4f}")
             print(f"  AQ Spatial Absolute: {result['evaluation']['aq_spatial_absolute']:.4f}")
             print(f"  Over-spraying rate: {result['evaluation']['overspreading_rate']:.4f}")
