@@ -156,13 +156,22 @@ def benchmark_superpixels(image_dir, ground_truth_dir, image, ground_truth, outp
     id2label = {0: "background", 1: "crop", 2: "weed"}
     
     models_to_test = [
-        {"name": "segformer", "variant": None, "label": "Base (non calibrato)"},
-        {"name": "segformer", "variant": None, "label": "Temp Scaling", "calibration": "weights/segformer_calibrated_n30_temperature_scaling.pkl"},
-        {"name": "segformer", "variant": None, "label": "Matrix Scaling", "calibration": "weights/segformer_calibrated_n100_matrix_scaling.pkl"},
-        {"name": "segformer", "variant": "focal_gamma1.0", "label": "Focal Loss γ=1.0"},
-        {"name": "segformer", "variant": "focal_gamma2.0", "label": "Focal Loss γ=2.0"},
-        {"name": "segformer", "variant": "focal_gamma2.0", "label": "Focal + Temp Scaling", "calibration": "weights/segformer_calibrated_n30_temperature_scaling.pkl"},
-        {"name": "segformer", "variant": "focal_gamma2.0", "label": "Focal + Matrix Scaling", "calibration": "weights/segformer_calibrated_n100_matrix_scaling_ckpt_segformer_focal_gamma2.pkl"},
+        # SegFormer — Cross Entropy
+        {"name": "segformer", "variant": None,             "label": "SegFormer Base (CE)"},
+        {"name": "segformer", "variant": None,             "label": "SegFormer Temp Scaling (CE)",   "calibration": "weights/segformer_calibrated_n30_temperature_scaling.pkl"},
+        {"name": "segformer", "variant": None,             "label": "SegFormer Matrix Scaling (CE)", "calibration": "weights/segformer_calibrated_n100_matrix_scaling.pkl"},
+        # SegFormer — Focal Loss γ=2.0
+        {"name": "segformer", "variant": "focal_gamma2.0", "label": "SegFormer Base (FL)"},
+        {"name": "segformer", "variant": "focal_gamma2.0", "label": "SegFormer Temp Scaling (FL)",   "calibration": "weights/segformer_calibrated_n30_temperature_scaling_ckpt_segformer_focal_gamma2.pkl"},
+        {"name": "segformer", "variant": "focal_gamma2.0", "label": "SegFormer Matrix Scaling (FL)", "calibration": "weights/segformer_calibrated_n100_matrix_scaling_ckpt_segformer_focal_gamma2.pkl"},
+        # MobileNetV4 — Cross Entropy
+        {"name": "mobilenetv4", "variant": None,             "label": "MobileNetV4 Base (CE)"},
+        {"name": "mobilenetv4", "variant": None,             "label": "MobileNetV4 Temp Scaling (CE)",   "calibration": "weights/mobilenetv4_calibrated_n30_temperature_scaling_ckpt_mobilenetv4.pkl"},
+        {"name": "mobilenetv4", "variant": None,             "label": "MobileNetV4 Matrix Scaling (CE)", "calibration": "weights/mobilenetv4_calibrated_n100_matrix_scaling_ckpt_mobilenetv4.pkl"},
+        # MobileNetV4 — Focal Loss γ=2.0
+        {"name": "mobilenetv4", "variant": "focal_gamma2.0", "label": "MobileNetV4 Base (FL)"},
+        {"name": "mobilenetv4", "variant": "focal_gamma2.0", "label": "MobileNetV4 Temp Scaling (FL)",   "calibration": "weights/mobilenetv4_calibrated_n30_temperature_scaling_ckpt_mobilenetv4_focal_gamma2.pkl"},
+        {"name": "mobilenetv4", "variant": "focal_gamma2.0", "label": "MobileNetV4 Matrix Scaling (FL)", "calibration": "weights/mobilenetv4_calibrated_n100_matrix_scaling_ckpt_mobilenetv4_focal_gamma2.pkl"},
     ]
     
     # Definiamo il range di soglie (tau) per misurare la libertà dell'agricoltore
