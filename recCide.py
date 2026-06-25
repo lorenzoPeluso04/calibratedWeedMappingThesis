@@ -26,12 +26,13 @@ from calweed.superpixel import (
     get_superpixel_states,
     merge_adjacent_superpixels,
     visualize_superpixels_by_state,
+    visualize_superpixels_by_prob,
 )
 
 class HerbicideRecommendationSystem:
     # Mappatura threshold → file di calibrazione per valutazione superpixel
     """THRESHOLD_CALIBRATION_MAP = {
-        0.10: "weights/segformer_focal_gamma2.0.pth",
+        0.10: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
         0.20: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
         0.30: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
         0.40: "weights/segformer_calibrated_n30_temperature_scaling.pkl",
@@ -296,6 +297,17 @@ class HerbicideRecommendationSystem:
             image_name = os.path.basename(image_path) if image_path else "image"
             base_name = os.path.splitext(image_name)[0]
             
+            # 0. Salva l'immagine di segmentazione semantica (tutte le classi)
+            seg_output_path = os.path.join(output_dir, f"{base_name}_segmented.png")
+            self.save_segmented_image(preds, seg_output_path)
+
+            # 0b. Salva la heatmap di probabilità per-pixel (\hat{P}_weed)
+            import matplotlib
+            heatmap_colored = (matplotlib.colormaps['hot'](weed_probs)[:, :, :3] * 255).astype(np.uint8)
+            heatmap_path = os.path.join(output_dir, f"{base_name}_weed_prob_heatmap.png")
+            Image.fromarray(heatmap_colored, mode='RGB').save(heatmap_path)
+            print(f"✓ Heatmap probabilità per-pixel salvata in: {heatmap_path}")
+
             # 1. Salva l'immagine superpixel classica con colori per stato
             colored_original = visualize_superpixels_by_state(labels_original, weed_probs, threshold, image)
             colored_original_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_{num_segments}_superpixel_original_state.png")
@@ -308,6 +320,18 @@ class HerbicideRecommendationSystem:
             colored_merged.save(colored_merged_path)
             print(f"✓ Superpixel uniti (colorati per stato) salvati in: {colored_merged_path}")
             
+            # 2b. Salva superpixel originali colorati per probabilità media (\bar{P}_i)
+            prob_original = visualize_superpixels_by_prob(labels_original, weed_probs, image)
+            prob_original_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_{num_segments}_superpixel_original_prob.png")
+            prob_original.save(prob_original_path)
+            print(f"✓ Superpixel originali (colorati per prob media) salvati in: {prob_original_path}")
+
+            # 2c. Salva superpixel merged colorati per probabilità media (\bar{P}_i)
+            prob_merged = visualize_superpixels_by_prob(labels_merged, weed_probs, image)
+            prob_merged_path = os.path.join(output_dir, f"{base_name}_tau_{threshold}_{num_segments}_superpixel_merged_prob.png")
+            prob_merged.save(prob_merged_path)
+            print(f"✓ Superpixel uniti (colorati per prob media) salvati in: {prob_merged_path}")
+
             # 3. Salva immagine superpixel originale con bordi
             segmented_original = save_superpixel_segmentation(labels_original, image, output_dir, 
                                                              filename=f"{base_name}_tau_{threshold}_{num_segments}_superpixel_original_borders.png")
@@ -452,8 +476,17 @@ class HerbicideRecommendationSystem:
         states = get_superpixel_states(superpixel_labels, weed_probs, threshold)
         superpixel_labels_merged = merge_adjacent_superpixels(superpixel_labels, states)
         
-        # 4. Calcolo dell'ECE (Indipendente dalla soglia)
-        ece, acc_bin, conf_bin = expected_calibration_error_superpixel(
+        # 4. Calcolo dell'ECE sui superpixel ORIGINALI (non uniti)
+        ece_orig, acc_bin_orig, conf_bin_orig = expected_calibration_error_superpixel(
+            superpixel_labels=superpixel_labels,
+            weed_probs=weed_probs,
+            ground_truth=gt,
+            weed_id=weed_id,
+            n_bins=10
+        )
+
+        # 4b. Calcolo dell'ECE sui superpixel MERGED
+        ece_merged, acc_bin, conf_bin = expected_calibration_error_superpixel(
             superpixel_labels=superpixel_labels_merged,
             weed_probs=weed_probs,
             ground_truth=gt,
@@ -461,8 +494,17 @@ class HerbicideRecommendationSystem:
             n_bins=10
         )
         
-        # 5. Calcolo delle metriche spaziali condizionate dalla soglia dell'agricoltore
-        spatial_metrics = evaluate_superpixel_decisions(
+        # 5. Calcolo delle metriche spaziali sui superpixel ORIGINALI
+        spatial_metrics_orig = evaluate_superpixel_decisions(
+            superpixel_labels=superpixel_labels,
+            weed_probs=weed_probs,
+            ground_truth=gt,
+            weed_id=weed_id,
+            threshold=threshold
+        )
+
+        # 5b. Calcolo delle metriche spaziali sui superpixel MERGED
+        spatial_metrics_merged = evaluate_superpixel_decisions(
             superpixel_labels=superpixel_labels_merged,
             weed_probs=weed_probs,
             ground_truth=gt,
@@ -477,10 +519,16 @@ class HerbicideRecommendationSystem:
         # save_superpixel_segmentation(image_rgb, superpixel_labels, os.path.join(output_dir, "segmentation.png"))
         
         return {
-            "ece": ece,
-            "aq_spatial_absolute": spatial_metrics["aq_spatial_absolute"],
-            "overspreading_rate": spatial_metrics["overspreading_rate"],
-            "underspreading_rate": spatial_metrics["underspreading_rate"]
+            # Superpixel originali (non uniti)
+            "ece": ece_orig,
+            "aq_spatial_absolute": spatial_metrics_orig["aq_spatial_absolute"],
+            "overspreading_rate": spatial_metrics_orig["overspreading_rate"],
+            "underspreading_rate": spatial_metrics_orig["underspreading_rate"],
+            # Superpixel merged
+            "ece_merged": ece_merged,
+            "aq_spatial_absolute_merged": spatial_metrics_merged["aq_spatial_absolute"],
+            "overspreading_rate_merged": spatial_metrics_merged["overspreading_rate"],
+            "underspreading_rate_merged": spatial_metrics_merged["underspreading_rate"],
         }
 
     def recommend_batch(self, image_paths: Iterable[str], tolerance_mode='liberal', area_ha=1.0, output_dir=None):

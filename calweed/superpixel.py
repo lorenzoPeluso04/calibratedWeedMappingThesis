@@ -145,29 +145,27 @@ def get_adjacent_superpixels(superpixel_labels: np.ndarray) -> Dict[int, set]:
     """
     h, w = superpixel_labels.shape
     adjacency = {}
-    
+
     max_label = int(superpixel_labels.max())
     for label in range(1, max_label + 1):
         adjacency[label] = set()
-    
-    # Controlla adiacenza verticale
-    for i in range(h - 1):
-        for j in range(w):
-            label1 = superpixel_labels[i, j]
-            label2 = superpixel_labels[i + 1, j]
-            if label1 != label2:
-                adjacency[label1].add(label2)
-                adjacency[label2].add(label1)
-    
-    # Controlla adiacenza orizzontale
-    for i in range(h):
-        for j in range(w - 1):
-            label1 = superpixel_labels[i, j]
-            label2 = superpixel_labels[i, j + 1]
-            if label1 != label2:
-                adjacency[label1].add(label2)
-                adjacency[label2].add(label1)
-    
+
+    # Adiacenza verticale (vettorizzata)
+    vertical_diff = superpixel_labels[:-1, :] != superpixel_labels[1:, :]
+    v1 = superpixel_labels[:-1, :][vertical_diff]
+    v2 = superpixel_labels[1:, :][vertical_diff]
+    for a, b in zip(v1.tolist(), v2.tolist()):
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+
+    # Adiacenza orizzontale (vettorizzata)
+    horizontal_diff = superpixel_labels[:, :-1] != superpixel_labels[:, 1:]
+    h1 = superpixel_labels[:, :-1][horizontal_diff]
+    h2 = superpixel_labels[:, 1:][horizontal_diff]
+    for a, b in zip(h1.tolist(), h2.tolist()):
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+
     return adjacency
 
 
@@ -272,6 +270,69 @@ def visualize_superpixels_by_state(superpixel_labels: np.ndarray, weed_probs: np
         colored_image = (blended * 255).astype(np.uint8)
     
     return Image.fromarray(colored_image, mode="RGB")
+
+
+def visualize_superpixels_by_prob(superpixel_labels: np.ndarray, weed_probs: np.ndarray,
+                                  image_rgb: Image.Image = None,
+                                  colormap_name: str = 'YlOrRd') -> Image.Image:
+    """
+    Visualizza i superpixel colorati in funzione della probabilità media di infestante (\bar{P}_i),
+    usando una scala di calore continua (giallo=bassa prob, rosso=alta prob).
+
+    Args:
+        superpixel_labels: matrice dei label dei superpixel
+        weed_probs: matrice delle probabilità per-pixel della classe weed
+        image_rgb: immagine RGB originale (opzionale, per overlay dei bordi)
+        colormap_name: nome della colormap matplotlib (default 'YlOrRd')
+
+    Returns:
+        PIL Image con superpixel colorati per probabilità media
+    """
+    max_label = int(superpixel_labels.max())
+    h, w = superpixel_labels.shape
+    prob_map = np.zeros((h, w), dtype=np.float32)
+
+    for label in range(1, max_label + 1):
+        mask = superpixel_labels == label
+        if not mask.any():
+            continue
+        prob_map[mask] = float(weed_probs[mask].mean())
+
+    colormap = plt.colormaps[colormap_name]
+    colored_rgba = colormap(prob_map)          # shape (H, W, 4), valori in [0, 1]
+    colored_rgb = (colored_rgba[:, :, :3] * 255).astype(np.uint8)
+
+    if image_rgb is not None:
+        image_np = np.asarray(image_rgb)
+        image_normalized = image_np / 255.0 if image_np.max() > 1 else image_np.astype(float)
+        borders = mark_boundaries(image_normalized, superpixel_labels, color=(1, 1, 1), mode='outer')
+        blended = 0.75 * (colored_rgb.astype(np.float32) / 255.0) + 0.25 * borders
+        colored_rgb = (blended * 255).astype(np.uint8)
+
+    result = Image.fromarray(colored_rgb, mode='RGB')
+
+    # Disegna la probabilità media come testo al centroide di ogni superpixel
+    from PIL import ImageDraw, ImageFont
+    draw = ImageDraw.Draw(result)
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", size=max(9, h // 60))
+    except Exception:
+        font = ImageFont.load_default()
+
+    for label in range(1, max_label + 1):
+        mask = superpixel_labels == label
+        if not mask.any():
+            continue
+        mean_prob = float(weed_probs[mask].mean())
+        # Centroide del superpixel
+        rows, cols = np.where(mask)
+        cy, cx = int(rows.mean()), int(cols.mean())
+        text = f"{mean_prob:.2f}"
+        # Colore testo: nero se sfondo chiaro, bianco se scuro
+        text_color = (0, 0, 0) if mean_prob < 0.5 else (255, 255, 255)
+        draw.text((cx, cy), text, fill=text_color, font=font, anchor="mm")
+
+    return result
 
 
 def save_superpixel_segmentation(superpixel_labels: np.ndarray, image_rgb: Image.Image, 

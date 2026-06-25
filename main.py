@@ -158,9 +158,11 @@ def benchmark_superpixels(image_dir, ground_truth_dir, image, ground_truth, outp
     models_to_test = [
         {"name": "segformer", "variant": None, "label": "Base (non calibrato)"},
         {"name": "segformer", "variant": None, "label": "Temp Scaling", "calibration": "weights/segformer_calibrated_n30_temperature_scaling.pkl"},
+        {"name": "segformer", "variant": None, "label": "Matrix Scaling", "calibration": "weights/segformer_calibrated_n100_matrix_scaling.pkl"},
         {"name": "segformer", "variant": "focal_gamma1.0", "label": "Focal Loss γ=1.0"},
         {"name": "segformer", "variant": "focal_gamma2.0", "label": "Focal Loss γ=2.0"},
         {"name": "segformer", "variant": "focal_gamma2.0", "label": "Focal + Temp Scaling", "calibration": "weights/segformer_calibrated_n30_temperature_scaling.pkl"},
+        {"name": "segformer", "variant": "focal_gamma2.0", "label": "Focal + Matrix Scaling", "calibration": "weights/segformer_calibrated_n100_matrix_scaling_ckpt_segformer_focal_gamma2.pkl"},
     ]
     
     # Definiamo il range di soglie (tau) per misurare la libertà dell'agricoltore
@@ -239,17 +241,27 @@ def benchmark_superpixels(image_dir, ground_truth_dir, image, ground_truth, outp
                     "image": image_base_name,
                     "model": label,
                     "threshold": tau,
+                    # Superpixel originali (non uniti)
                     "ece": metrics["ece"],
                     "aq_spatial_absolute": metrics["aq_spatial_absolute"],
                     "overspreading_rate": metrics["overspreading_rate"],
                     "underspreading_rate": metrics["underspreading_rate"],
+                    # Superpixel merged
+                    "ece_merged": metrics["ece_merged"],
+                    "aq_spatial_absolute_merged": metrics["aq_spatial_absolute_merged"],
+                    "overspreading_rate_merged": metrics["overspreading_rate_merged"],
+                    "underspreading_rate_merged": metrics["underspreading_rate_merged"],
                 })
                 all_results_summary.append(results_summary[-1])
         
         # Salva il riepilogo per questa immagine includendo la colonna Threshold
         summary_path = os.path.join(output_dir, f"benchmark_summary_merged_{image_base_name}_{num_segments}.csv")
         with open(summary_path, "w") as f:
-            headers = ["Model", "Threshold", "ECE", "AQ_Spatial_Absolute", "Over_spraying", "Under_spraying"]
+            headers = [
+                "Model", "Threshold",
+                "ECE", "AQ_Spatial_Absolute", "Over_spraying", "Under_spraying",
+                "ECE_Merged", "AQ_Spatial_Absolute_Merged", "Over_spraying_Merged", "Under_spraying_Merged",
+            ]
             f.write(",".join(headers) + "\n")
             for row in results_summary:
                 values = [
@@ -259,6 +271,10 @@ def benchmark_superpixels(image_dir, ground_truth_dir, image, ground_truth, outp
                     f"{row['aq_spatial_absolute']:.2f}",
                     f"{row['overspreading_rate']:.4f}",
                     f"{row['underspreading_rate']:.4f}",
+                    f"{row['ece_merged']:.4f}",
+                    f"{row['aq_spatial_absolute_merged']:.2f}",
+                    f"{row['overspreading_rate_merged']:.4f}",
+                    f"{row['underspreading_rate_merged']:.4f}",
                 ]
                 f.write(",".join(values) + "\n")
         
@@ -268,17 +284,25 @@ def benchmark_superpixels(image_dir, ground_truth_dir, image, ground_truth, outp
     if len(image_gt_pairs) > 1:
         aggregate_summary_path = os.path.join(output_dir, f"benchmark_summary_aggregate_merged_{num_segments}.csv")
         with open(aggregate_summary_path, "w") as f:
-            headers = ["Image", "Model", "Threshold", "ECE", "AQ_Spatial_Absolute", "Over_spraying", "Under_spraying"]
+            headers = [
+                "Image", "Model", "Threshold",
+                "ECE", "AQ_Spatial_Absolute", "Over_spraying", "Under_spraying",
+                "ECE_Merged", "AQ_Spatial_Absolute_Merged", "Over_spraying_Merged", "Under_spraying_Merged",
+            ]
             f.write(",".join(headers) + "\n")
             for row in all_results_summary:
                 values = [
                     str(row["image"]),
                     str(row["model"]),
                     f"{row['threshold']:.2f}",
-                    f"{row['ece']:.4f}",  # <-- CORRETTO: Ora scrive il valore dell'ECE, non il nome del modello!
+                    f"{row['ece']:.4f}",
                     f"{row['aq_spatial_absolute']:.2f}",
                     f"{row['overspreading_rate']:.4f}",
                     f"{row['underspreading_rate']:.4f}",
+                    f"{row['ece_merged']:.4f}",
+                    f"{row['aq_spatial_absolute_merged']:.2f}",
+                    f"{row['overspreading_rate_merged']:.4f}",
+                    f"{row['underspreading_rate_merged']:.4f}",
                 ]
                 f.write(",".join(values) + "\n")
         print(f"\nRiepilogo aggregato salvato in: {aggregate_summary_path}")
